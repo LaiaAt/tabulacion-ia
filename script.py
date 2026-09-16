@@ -1,6 +1,6 @@
 # ==============================================================================
 # SISTEMA DE TABULACIÓN RESTREPO_2 (MODO 100% REFLEJO LITERAL Y TÁCITO)
-# CASCADA: GEMINI 3.X/2.5 -> KIMI -> GROQ | CERO INVENTOS
+# AUTO-LIMPIEZA DE MEMORIA: NUNCA MÁS BORRAR A MANO
 # ==============================================================================
 
 import os
@@ -23,7 +23,6 @@ from google.genai import types
 
 print("⏳ [1/3] Cargando APIs desde Secrets...")
 
-# Conexión Gemini
 gemini_client = None
 k_gemini = os.environ.get('GEMINI_API_KEY')
 if k_gemini:
@@ -33,14 +32,12 @@ if k_gemini:
     except Exception as e:
         print(f"⚠️ Error iniciando Gemini: {e}")
 
-# Conexión Kimi
 kimi_key = None
 k_kimi = os.environ.get('KIMI_API_KEY') or os.environ.get('MOONSHOT_API_KEY')
 if k_kimi:
     kimi_key = k_kimi.strip()
     print("✅ KIMI listo (Prioridad 2).")
 
-# Conexión Groq
 groq_client = None
 k_groq = os.environ.get('GROQ_API_KEY')
 if k_groq:
@@ -50,7 +47,6 @@ if k_groq:
     except Exception as e:
         print(f"⚠️ Error iniciando Groq: {e}")
 
-# Credenciales de Correo
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
 EMAIL_DESTINO = os.environ.get('GMAIL_USER')
@@ -58,8 +54,6 @@ EMAIL_DESTINO = os.environ.get('GMAIL_USER')
 RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
-RUTA_MEMORIA_CSV = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria.csv')
-RUTA_EXCEL_FINAL = os.path.join(RUTA_BASE, 'RESTREPO_2_IA.xlsx')
 
 # ==========================================
 # LIMPIEZA DE ASUNTO SIN MUTILACIÓN
@@ -213,9 +207,6 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception: pass
     return {}
 
-# ==============================================================================
-# MOTOR DE CONFIANZA 100% EN LA IA
-# ==============================================================================
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
 
@@ -292,33 +283,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
 
     return datos
 
-# ==============================================================================
-# MEMORIA Y AUTO-REPARACIÓN
-# ==============================================================================
-def cargar_memoria():
-    if os.path.exists(RUTA_MEMORIA_CSV):
-        try:
-            df = pd.read_csv(RUTA_MEMORIA_CSV)
-            if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                filas_error = (
-                    (df["No. RADICADO REMITENTE"].astype(str).str.contains(r'ALMA-\d{4}-\d{3,4}$', regex=True)) |
-                    (df["RAZON SOCIAL DESTINATARIO"] == "CONSORCIO 4C") & (df["UBICACION_ARCHIVO"].str.contains("Recibidas")) |
-                    (df["No. RADICADO DESTINATARIO"].astype(str).str.contains("SIN RADICADO")) |
-                    ((df["No. RADICADO REMITENTE"] == df["No. RADICADO DESTINATARIO"]) & (~df["No. RADICADO REMITENTE"].astype(str).str.contains("SIN RADICADO")))
-                )
-                num_err = filas_error.sum()
-                if num_err > 0:
-                    print(f"🔧 Se detectaron {num_err} filas con errores pasados. Se depurarán automáticamente.")
-                    df = df[~filas_error]
-                    df.to_csv(RUTA_MEMORIA_CSV, index=False)
-
-                if not df.empty:
-                    print(f"🔄 MEMORIA: {len(df)} archivos limpios conservados.")
-                    item_sig = int(df["ÍTEM"].max()) + 1 if "ÍTEM" in df.columns else len(df) + 1
-                    return set(df["UBICACION_ARCHIVO"].dropna()), item_sig
-        except Exception: pass
-    return set(), 1
-
 def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
     archivos_encontrados = []
     if not os.path.exists(ruta_base): return archivos_encontrados
@@ -332,16 +296,13 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
     return archivos_encontrados
 
 # ==============================================================================
-# PROCESO PRINCIPAL (CON TUS PREGUNTAS DE COLAB)
+# PROCESO PRINCIPAL (CON AUTO-LIMPIEZA TOTAL)
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (ESPEJO LITERAL ABSOLUTO)")
+    print(" MOTOR RESTREPO_2 (AUTO-LIMPIEZA Y TABULACIÓN IA)")
     print("="*70)
 
-    procesados, item_counter = cargar_memoria()
-
-    # Lectura automática de tus respuestas desde GitHub Actions
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
     limite = None
     procesar_anio = None
@@ -351,27 +312,44 @@ def procesar_archivos():
             limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
         except Exception:
             limite = 5
-        print(f"🎲 MODO PRUEBA ACTIVADO: {limite} archivos AL AZAR por flujo.")
-    
-    resp_alcance = os.environ.get('ALCANCE', 'todo').strip()
-    m_anio_dir = re.search(r'\b(20\d{2})\b', resp_alcance)
-    if m_anio_dir:
-        procesar_anio = m_anio_dir.group(1)
-        print(f"🎯 FILTRADO: Solo año {procesar_anio}.")
+        print(f"🎲 MODO PRUEBA: {limite} archivos AL AZAR por flujo.")
+        etiqueta = f"PRUEBA_{limite}_archivos"
     else:
-        print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
+        resp_alcance = os.environ.get('ALCANCE', 'todo').strip()
+        m_anio_dir = re.search(r'\b(20\d{2})\b', resp_alcance)
+        if m_anio_dir:
+            procesar_anio = m_anio_dir.group(1)
+            print(f"🎯 FILTRADO: Solo año {procesar_anio}.")
+            etiqueta = f"Año_{procesar_anio}"
+        else:
+            print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
+            etiqueta = "Completo"
 
+    # Nombres dinámicos de los archivos para esta corrida específica
+    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
+    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
+
+    # 🧹 AUTO-LIMPIEZA AUTOMÁTICA: Si existía memoria vieja, se borra sola
+    if os.path.exists(ruta_memoria):
+        os.remove(ruta_memoria)
+        print(f"🧹 Memoria previa borrada automáticamente: {ruta_memoria}")
+    if os.path.exists(ruta_excel):
+        os.remove(ruta_excel)
+
+    print(f"✨ Iniciando con memoria 100% nueva y limpia para: {etiqueta}\n")
+
+    item_counter = 1
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
 
     for tipo, ruta_raiz in flujos:
         print(f"\n📂 Buscando en: {tipo}...")
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
-        pendientes = [(p, r, a) for p, r, a in todos_los_pdfs if os.path.relpath(r, RUTA_BASE) not in procesados]
-        print(f"   Encontrados {len(todos_los_pdfs)} PDFs ({len(pendientes)} pendientes).")
+        print(f"   Encontrados {len(todos_los_pdfs)} PDFs.")
 
+        pendientes = todos_los_pdfs
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
-            print(f"   🎲 Muestreo de prueba aplicado: se procesarán {len(pendientes)} PDFs al azar.")
+            print(f"   🎲 Muestreo de prueba: se procesarán {len(pendientes)} PDFs al azar.")
 
         for pdf, ruta_completa, anio_doc in pendientes:
             t_inicio = time.time()
@@ -396,41 +374,35 @@ def procesar_archivos():
                 "ASUNTO / TIPO DOCUMENTAL": datos_completos.get("ASUNTO"),
                 "UBICACION_ARCHIVO": ruta_relativa
             }
-            pd.DataFrame([fila]).to_csv(RUTA_MEMORIA_CSV, mode='a', header=not os.path.exists(RUTA_MEMORIA_CSV), index=False)
+            pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
             item_counter += 1
             time.sleep(2.0)
 
-    if os.path.exists(RUTA_MEMORIA_CSV):
-        pd.read_csv(RUTA_MEMORIA_CSV).to_excel(RUTA_EXCEL_FINAL, index=False)
-        print(f"\n✅ EXCEL FINALIZADO EN:\n📁 {RUTA_EXCEL_FINAL}")
-        enviar_correo_excel(RUTA_EXCEL_FINAL, es_prueba, limite, procesar_anio)
+    if os.path.exists(ruta_memoria):
+        pd.read_csv(ruta_memoria).to_excel(ruta_excel, index=False)
+        print(f"\n✅ EXCEL FINALIZADO EN:\n📁 {ruta_excel}")
+        enviar_correo_excel(ruta_excel, etiqueta)
 
 # ==============================================================================
 # ENVÍO AUTOMÁTICO DE CORREO
 # ==============================================================================
-def enviar_correo_excel(ruta_archivo, es_prueba, limite, anio_texto):
+def enviar_correo_excel(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         print("⚠️ No se configuraron credenciales de correo. Omitiendo envío.")
         return
 
-    if es_prueba in ['si', 's', 'true']:
-        etiqueta = f"PRUEBA_{limite}_archivos"
-    elif anio_texto:
-        etiqueta = f"Año_{anio_texto}"
-    else:
-        etiqueta = "Completo"
-
+    nombre_bonito = etiqueta.replace("_", " ")
     print("📧 Preparando correo para enviar a:", EMAIL_DESTINO)
     msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Finalizada ({etiqueta.replace("_", " ")}) - Excel Adjunto'
+    msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - Excel Adjunto'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
-    msg.set_content(f'Hola Eduardo,\n\nHa finalizado el proceso ({etiqueta.replace("_", " ")}).\nSe adjunta el Excel generado.\n\nSaludos!')
+    msg.set_content(f'Hola Eduardo,\n\nHa finalizado con éxito el proceso ({nombre_bonito}).\nSe adjunta el Excel generado.\n\nSaludos!')
 
     try:
         with open(ruta_archivo, 'rb') as f:
             file_data = f.read()
-            file_name = f"RESTREPO_2_IA_{etiqueta}.xlsx"
+            file_name = os.path.basename(ruta_archivo)
         
         msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
 
