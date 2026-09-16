@@ -170,7 +170,8 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
 
     if gemini_client and img_bytes:
-        modelos_gemini = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+        # TUS MODELOS ORIGINALES DE COLAB
+        modelos_gemini = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
         for mod in modelos_gemini:
             for intento in range(2):
                 try:
@@ -181,9 +182,10 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     )
                     d = parsear_json(r.text)
                     if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                        print(f"      ♊ Transcripción Gemini ({mod})")
+                        print(f"      ♊ Transcripción Gemini exitosa ({mod})")
                         return d
                 except Exception as e:
+                    print(f"      ⚠️ Intento con Gemini ({mod}) falló: {e}")
                     if ("429" in str(e) or "503" in str(e)) and intento == 0: 
                         time.sleep(2.5)
                         continue
@@ -200,17 +202,22 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
                         print(f"      🌙 Transcripción Kimi ({mod_k})")
                         return d
-            except Exception: pass
+            except Exception as e:
+                print(f"      ⚠️ Kimi falló: {e}")
 
     if groq_client and not es_escaneado:
-        for mod_g in ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"]:
+        # TUS MODELOS ORIGINALES DE GROQ
+        for mod_g in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
             try:
                 res = groq_client.chat.completions.create(messages=[{"role": "user", "content": prompt_final}], model=mod_g, response_format={"type": "json_object"}, temperature=0.0)
                 d = parsear_json(res.choices[0].message.content)
                 if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
                     print(f"      ⚡ Transcripción Groq ({mod_g})")
                     return d
-            except Exception: pass
+            except Exception as e:
+                print(f"      ⚠️ Groq falló: {e}")
+    
+    print("      ❌ Ninguna IA pudo transcribir este documento (usando modo de emergencia).")
     return {}
 
 # ==============================================================================
