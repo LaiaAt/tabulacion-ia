@@ -1,7 +1,12 @@
 name: Ejecutar Tabulacion IA
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
+    inputs:
+      anio:
+        description: 'Escribe el año a tabular (ej. 2015, 2016, 2023)'
+        required: true
+        default: '2015'
 
 jobs:
   run-python-script:
@@ -37,15 +42,17 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descargar PDFs desde tus carpetas compartidas
+      - name: Descargar PDFs del año seleccionado
         run: |
-          echo "Descargando Cartas Enviadas desde Compartido conmigo..."
-          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me -v
-          echo "Descargando Comunicaciones Recibidas desde Compartido conmigo..."
-          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me -v
+          echo "Descargando solo PDFs del año ${{ inputs.anio }} en Cartas Enviadas..."
+          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "**/${{ inputs.anio }}/**.pdf" --include "**/${{ inputs.anio }}/**.PDF" -v
+          
+          echo "Descargando solo PDFs del año ${{ inputs.anio }} en Comunicaciones Recibidas..."
+          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "**/${{ inputs.anio }}/**.pdf" --include "**/${{ inputs.anio }}/**.PDF" -v
 
       - name: Ejecutar la IA de Tabulación
         env:
+          ANIO_PROCESAR: ${{ inputs.anio }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
@@ -53,10 +60,10 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      - name: Guardar memoria para no repetir PDFs mañana
+      - name: Guardar memoria para no repetir PDFs en el futuro
         run: |
           git config --global user.name "Bot-Memoria"
           git config --global user.email "bot@github.com"
           git add RESTREPO_2_IA_memoria.csv
-          git commit -m "Actualizar memoria de PDFs procesados" || echo "No hay cambios nuevos"
+          git commit -m "Actualizar memoria año ${{ inputs.anio }}" || echo "No hay cambios nuevos"
           git push
