@@ -7,14 +7,14 @@ jobs:
   run-python-script:
     runs-on: ubuntu-latest
     permissions:
-      contents: write 
+      contents: write
 
     steps:
       - name: Descargar el repositorio
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Instalar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -25,33 +25,24 @@ jobs:
       - name: Instalar conector de Google Drive (rclone)
         run: sudo apt-get install rclone
 
-      - name: Configurar acceso personal a Drive
+      - name: Configurar acceso a Google Drive
         run: |
           mkdir -p ~/.config/rclone
           cat << EOF > ~/.config/rclone/rclone.conf
-          [enviadas]
+          [midrive]
           type = drive
           client_id = ${{ secrets.DRIVE_CLIENT_ID }}
           client_secret = ${{ secrets.DRIVE_CLIENT_SECRET }}
           scope = drive.readonly
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
-          root_folder_id = ${{ secrets.ID_ENVIADAS }}
-
-          [recibidas]
-          type = drive
-          client_id = ${{ secrets.DRIVE_CLIENT_ID }}
-          client_secret = ${{ secrets.DRIVE_CLIENT_SECRET }}
-          scope = drive.readonly
-          token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
-          root_folder_id = ${{ secrets.ID_RECIBIDAS }}
           EOF
 
       - name: Descargar PDFs desde tus carpetas compartidas
         run: |
-          echo "Descargando Cartas Enviadas..."
-          rclone copy enviadas: ./15_01_Cartas_Enviadas
-          echo "Descargando Comunicaciones Recibidas..."
-          rclone copy recibidas: ./15_04_Comunic_Recibidas
+          echo "Descargando Cartas Enviadas desde Compartido conmigo..."
+          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me -v
+          echo "Descargando Comunicaciones Recibidas desde Compartido conmigo..."
+          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me -v
 
       - name: Ejecutar la IA de Tabulación
         env:
