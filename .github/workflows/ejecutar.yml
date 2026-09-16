@@ -7,9 +7,9 @@ on:
         description: '¿Ejecución de prueba? (si/no)'
         type: choice
         options:
-          - 'no'
           - 'si'
-        default: 'no'
+          - 'no'
+        default: 'si'
       limite_prueba:
         description: 'Si es prueba, ¿cuántos archivos AL AZAR por flujo?'
         required: false
@@ -53,21 +53,34 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descargar PDFs de Google Drive (Filtro Enviadas y Recibidas Corregido)
+      - name: Descarga Inteligente de PDFs desde Drive
         run: |
+          # 1. Definir el filtro según el año o si es "todo"
           if [ "${{ inputs.alcance }}" = "todo" ]; then
-            echo "Modo: Tabular TODO"
             FILTRO="**.[pP][dD][fF]"
           else
-            echo "Modo: Tabular año ${{ inputs.alcance }}"
             FILTRO="*${{ inputs.alcance }}*/**.[pP][dD][fF]"
           fi
 
-          echo "Descargando Cartas Enviadas con filtro: $FILTRO"
-          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "$FILTRO" -v
-          
-          echo "Descargando Comunicaciones Recibidas con filtro: $FILTRO"
-          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
+          # 2. Descarga según el modo (Prueba vs Producción)
+          if [ "${{ inputs.es_prueba }}" = "si" ]; then
+            echo "🎲 MODO PRUEBA: Sorteando solo ${{ inputs.limite_prueba }} archivos al azar en la nube..."
+            
+            # Sortea solo N archivos en Enviadas y descarga únicamente esos N
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_enviadas.txt
+            echo "Archivos elegidos de Enviadas:" && cat lista_enviadas.txt
+            rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from lista_enviadas.txt -v
+
+            # Sortea solo N archivos en Recibidas y descarga únicamente esos N
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_recibidas.txt
+            echo "Archivos elegidos de Recibidas:" && cat lista_recibidas.txt
+            rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from lista_recibidas.txt -v
+
+          else
+            echo "🚀 MODO PRODUCCIÓN: Descargando todos los PDFs..."
+            rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "$FILTRO" -v
+            rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
+          fi
 
       - name: Ejecutar la IA de Tabulación
         env:
@@ -86,5 +99,5 @@ jobs:
           git config --global user.name "Bot-Memoria"
           git config --global user.email "bot@github.com"
           git add RESTREPO_2_IA_memoria.csv
-          git commit -m "Actualizar memoria de PDFs procesados" || echo "No hay cambios nuevos"
+          git commit -m "Actualizar memoria" || echo "No hay cambios nuevos"
           git push
