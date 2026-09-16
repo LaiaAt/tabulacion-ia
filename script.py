@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (GITHUB ACTIONS + GMAIL AUTOMÁTICO)
-# CASCADA: GEMINI 3.X/2.5 -> KIMI -> GROQ | CERO INVENTOS | REFLEJO LITERAL
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MODO 100% REFLEJO LITERAL Y TÁCITO)
+# CASCADA: GEMINI 3.X/2.5 -> KIMI -> GROQ | CERO INVENTOS
 # ==============================================================================
 
 import os
@@ -21,11 +21,9 @@ from groq import Groq
 from google import genai
 from google.genai import types
 
-# ==============================================================================
-# CONEXIÓN DE APIS DESDE GITHUB SECRETS
-# ==============================================================================
-print("⏳ Cargando configuraciones y APIs...")
+print("⏳ [1/3] Cargando APIs desde Secrets...")
 
+# Conexión Gemini
 gemini_client = None
 k_gemini = os.environ.get('GEMINI_API_KEY')
 if k_gemini:
@@ -35,11 +33,14 @@ if k_gemini:
     except Exception as e:
         print(f"⚠️ Error iniciando Gemini: {e}")
 
-kimi_key = os.environ.get('KIMI_API_KEY')
-if kimi_key:
-    kimi_key = kimi_key.strip()
+# Conexión Kimi
+kimi_key = None
+k_kimi = os.environ.get('KIMI_API_KEY') or os.environ.get('MOONSHOT_API_KEY')
+if k_kimi:
+    kimi_key = k_kimi.strip()
     print("✅ KIMI listo (Prioridad 2).")
 
+# Conexión Groq
 groq_client = None
 k_groq = os.environ.get('GROQ_API_KEY')
 if k_groq:
@@ -49,21 +50,20 @@ if k_groq:
     except Exception as e:
         print(f"⚠️ Error iniciando Groq: {e}")
 
-# Credenciales de Gmail
+# Credenciales de Correo
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
 EMAIL_DESTINO = os.environ.get('GMAIL_USER')
 
-# Rutas locales dentro del servidor de GitHub
 RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 RUTA_MEMORIA_CSV = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria.csv')
 RUTA_EXCEL_FINAL = os.path.join(RUTA_BASE, 'RESTREPO_2_IA.xlsx')
 
-# ==============================================================================
+# ==========================================
 # LIMPIEZA DE ASUNTO SIN MUTILACIÓN
-# ==============================================================================
+# ==========================================
 def limpiar_asunto(asunto_raw, texto_doc=""):
     if not asunto_raw or str(asunto_raw).strip() in ["None", "N/A", ""]:
         m = re.search(r'ASUNTO\s*:\s*(.+?)(?=\n\s*(?:Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
@@ -78,9 +78,9 @@ def limpiar_asunto(asunto_raw, texto_doc=""):
     t = re.sub(r'^[\.\-\–—:,;\s]+', '', t).strip()
     return t if t else str(asunto_raw).strip()
 
-# ==============================================================================
+# ==========================================
 # INSUMOS DE IMAGEN Y TEXTO
-# ==============================================================================
+# ==========================================
 def obtener_insumos_documento(ruta_pdf):
     try:
         doc = fitz.open(ruta_pdf)
@@ -170,7 +170,6 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
 
     if gemini_client and img_bytes:
-        # TUS MODELOS ORIGINALES DE COLAB
         modelos_gemini = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
         for mod in modelos_gemini:
             for intento in range(2):
@@ -182,10 +181,9 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     )
                     d = parsear_json(r.text)
                     if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                        print(f"      ♊ Transcripción Gemini exitosa ({mod})")
+                        print(f"      ♊ Transcripción Gemini ({mod})")
                         return d
                 except Exception as e:
-                    print(f"      ⚠️ Intento con Gemini ({mod}) falló: {e}")
                     if ("429" in str(e) or "503" in str(e)) and intento == 0: 
                         time.sleep(2.5)
                         continue
@@ -202,11 +200,9 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
                         print(f"      🌙 Transcripción Kimi ({mod_k})")
                         return d
-            except Exception as e:
-                print(f"      ⚠️ Kimi falló: {e}")
+            except Exception: pass
 
     if groq_client and not es_escaneado:
-        # TUS MODELOS ORIGINALES DE GROQ
         for mod_g in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
             try:
                 res = groq_client.chat.completions.create(messages=[{"role": "user", "content": prompt_final}], model=mod_g, response_format={"type": "json_object"}, temperature=0.0)
@@ -214,10 +210,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
                     print(f"      ⚡ Transcripción Groq ({mod_g})")
                     return d
-            except Exception as e:
-                print(f"      ⚠️ Groq falló: {e}")
-    
-    print("      ❌ Ninguna IA pudo transcribir este documento (usando modo de emergencia).")
+            except Exception: pass
     return {}
 
 # ==============================================================================
@@ -300,7 +293,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     return datos
 
 # ==============================================================================
-# MEMORIA Y AUTO-REPARACIÓN DE ERRORES PASADOS
+# MEMORIA Y AUTO-REPARACIÓN
 # ==============================================================================
 def cargar_memoria():
     if os.path.exists(RUTA_MEMORIA_CSV):
@@ -339,22 +332,34 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
     return archivos_encontrados
 
 # ==============================================================================
-# PROCESO PRINCIPAL
+# PROCESO PRINCIPAL (CON TUS PREGUNTAS DE COLAB)
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (MODO AUTOMÁTICO - GITHUB ACTIONS)")
+    print(" MOTOR RESTREPO_2 (ESPEJO LITERAL ABSOLUTO)")
     print("="*70)
 
     procesados, item_counter = cargar_memoria()
-    
-    # Toma el año que escribiste en GitHub (o procesa todo si no especificas)
-    procesar_anio = os.environ.get('ANIO_PROCESAR', '').strip() or None
-    if procesar_anio:
-        print(f"🎯 FILTRADO AUTOMÁTICO: Procesando exclusivamente el año {procesar_anio}")
-    else:
-        print("🚀 Procesando archivos disponibles.")
+
+    # Lectura automática de tus respuestas desde GitHub Actions
+    es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
     limite = None
+    procesar_anio = None
+
+    if es_prueba in ['si', 's', 'true']:
+        try:
+            limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
+        except Exception:
+            limite = 5
+        print(f"🎲 MODO PRUEBA ACTIVADO: {limite} archivos AL AZAR por flujo.")
+    
+    resp_alcance = os.environ.get('ALCANCE', 'todo').strip()
+    m_anio_dir = re.search(r'\b(20\d{2})\b', resp_alcance)
+    if m_anio_dir:
+        procesar_anio = m_anio_dir.group(1)
+        print(f"🎯 FILTRADO: Solo año {procesar_anio}.")
+    else:
+        print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
 
@@ -364,7 +369,9 @@ def procesar_archivos():
         pendientes = [(p, r, a) for p, r, a in todos_los_pdfs if os.path.relpath(r, RUTA_BASE) not in procesados]
         print(f"   Encontrados {len(todos_los_pdfs)} PDFs ({len(pendientes)} pendientes).")
 
-        if limite and len(pendientes) > limite: pendientes = random.sample(pendientes, limite)
+        if limite and len(pendientes) > limite:
+            pendientes = random.sample(pendientes, limite)
+            print(f"   🎲 Muestreo de prueba aplicado: se procesarán {len(pendientes)} PDFs al azar.")
 
         for pdf, ruta_completa, anio_doc in pendientes:
             t_inicio = time.time()
@@ -396,46 +403,41 @@ def procesar_archivos():
     if os.path.exists(RUTA_MEMORIA_CSV):
         pd.read_csv(RUTA_MEMORIA_CSV).to_excel(RUTA_EXCEL_FINAL, index=False)
         print(f"\n✅ EXCEL FINALIZADO EN:\n📁 {RUTA_EXCEL_FINAL}")
-        enviar_correo_excel(RUTA_EXCEL_FINAL, procesar_anio)
+        enviar_correo_excel(RUTA_EXCEL_FINAL, es_prueba, limite, procesar_anio)
 
 # ==============================================================================
-# ENVÍO AUTOMÁTICO DE CORREO POR GMAIL
+# ENVÍO AUTOMÁTICO DE CORREO
 # ==============================================================================
-def enviar_correo_excel(ruta_archivo, anio_texto):
+def enviar_correo_excel(ruta_archivo, es_prueba, limite, anio_texto):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        print("⚠️ No se configuraron credenciales de correo (GMAIL_USER o GMAIL_APP_PASSWORD). Omitiendo envío.")
+        print("⚠️ No se configuraron credenciales de correo. Omitiendo envío.")
         return
 
-    etiqueta_anio = f"Año {anio_texto}" if anio_texto else "General"
+    if es_prueba in ['si', 's', 'true']:
+        etiqueta = f"PRUEBA_{limite}_archivos"
+    elif anio_texto:
+        etiqueta = f"Año_{anio_texto}"
+    else:
+        etiqueta = "Completo"
+
     print("📧 Preparando correo para enviar a:", EMAIL_DESTINO)
     msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Finalizada ({etiqueta_anio}) - Excel Adjunto'
+    msg['Subject'] = f'✅ Tabulación Finalizada ({etiqueta.replace("_", " ")}) - Excel Adjunto'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'El proceso de tabulación automática ha finalizado con éxito para el {etiqueta_anio}.\n'
-        f'Adjunto encontrarás el archivo Excel con todos los radicados y asuntos extraídos por la IA.\n\n'
-        f'Saludos,\n'
-        f'Bot Automático'
-    )
+    msg.set_content(f'Hola Eduardo,\n\nHa finalizado el proceso ({etiqueta.replace("_", " ")}).\nSe adjunta el Excel generado.\n\nSaludos!')
 
     try:
         with open(ruta_archivo, 'rb') as f:
             file_data = f.read()
-            nombre_adjunto = f"RESTREPO_2_IA_{etiqueta_anio.replace(' ', '_')}.xlsx"
+            file_name = f"RESTREPO_2_IA_{etiqueta}.xlsx"
         
-        msg.add_attachment(
-            file_data, 
-            maintype='application', 
-            subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
-            filename=nombre_adjunto
-        )
+        msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
 
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("🚀 ¡CORREO ENVIADO CON ÉXITO A TU GMAIL!")
+        print("🚀 ¡CORREO ENVIADO CON ÉXITO!")
     except Exception as e:
         print(f"❌ Error al enviar el correo: {e}")
 
