@@ -3,10 +3,21 @@ name: Ejecutar Tabulacion IA
 on:
   workflow_dispatch:
     inputs:
-      anio:
-        description: 'Escribe el año a tabular (ej. 2015, 2016, 2023)'
+      es_prueba:
+        description: '¿Ejecución de prueba? (si/no)'
+        type: choice
+        options:
+          - 'no'
+          - 'si'
+        default: 'no'
+      limite_prueba:
+        description: 'Si es prueba, ¿cuántos archivos AL AZAR por flujo?'
+        required: false
+        default: '5'
+      alcance:
+        description: '¿Tabular todo o un año específico? (Escribe "todo" o el año, ej. "2017")'
         required: true
-        default: '2015'
+        default: '2017'
 
 jobs:
   run-python-script:
@@ -42,17 +53,27 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descargar PDFs del año seleccionado
+      - name: Descargar PDFs de Google Drive (Filtro Enviadas y Recibidas Corregido)
         run: |
-          echo "Descargando solo PDFs del año ${{ inputs.anio }} en Cartas Enviadas..."
-          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "**/${{ inputs.anio }}/**.pdf" --include "**/${{ inputs.anio }}/**.PDF" -v
+          if [ "${{ inputs.alcance }}" = "todo" ]; then
+            echo "Modo: Tabular TODO"
+            FILTRO="**.[pP][dD][fF]"
+          else
+            echo "Modo: Tabular año ${{ inputs.alcance }}"
+            FILTRO="*${{ inputs.alcance }}*/**.[pP][dD][fF]"
+          fi
+
+          echo "Descargando Cartas Enviadas con filtro: $FILTRO"
+          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "$FILTRO" -v
           
-          echo "Descargando solo PDFs del año ${{ inputs.anio }} en Comunicaciones Recibidas..."
-          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "**/${{ inputs.anio }}/**.pdf" --include "**/${{ inputs.anio }}/**.PDF" -v
+          echo "Descargando Comunicaciones Recibidas con filtro: $FILTRO"
+          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
 
       - name: Ejecutar la IA de Tabulación
         env:
-          ANIO_PROCESAR: ${{ inputs.anio }}
+          ES_PRUEBA: ${{ inputs.es_prueba }}
+          LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
+          ALCANCE: ${{ inputs.alcance }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
@@ -65,5 +86,5 @@ jobs:
           git config --global user.name "Bot-Memoria"
           git config --global user.email "bot@github.com"
           git add RESTREPO_2_IA_memoria.csv
-          git commit -m "Actualizar memoria año ${{ inputs.anio }}" || echo "No hay cambios nuevos"
+          git commit -m "Actualizar memoria de PDFs procesados" || echo "No hay cambios nuevos"
           git push
