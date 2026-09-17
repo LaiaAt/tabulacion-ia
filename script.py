@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (100% GEMINI MULTI-KEY POOL ENGINE)
-# BALANCING: 8 CLAVES API ROTATIVAS | AUTO-RECUPERACIÓN 429 | CERO BASURA
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MULTI-HILO + SALVAVIDAS)
+# 4 HILOS PARALELOS | 14 CLAVES GEMINI | REANUDACIÓN AUTOMÁTICA
 # ==============================================================================
 
 import os
@@ -10,6 +10,8 @@ import re
 import random
 import base64
 import smtplib
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 import pandas as pd
 import requests
@@ -20,9 +22,6 @@ import io
 from google import genai
 from google.genai import types
 
-# ==============================================================================
-# INICIALIZACIÓN DEL POOL DE CLAVES GEMINI
-# ==============================================================================
 print("⏳ [1/3] Cargando Pool de Claves Gemini...")
 
 raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
@@ -37,7 +36,7 @@ for i, k in enumerate(lista_keys, 1):
         print(f"⚠️ Error cargando clave Gemini #{i}: {e}")
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} clientes/claves rotativas.")
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves rotativas.")
 else:
     print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.")
 
@@ -48,6 +47,11 @@ EMAIL_DESTINO = os.environ.get('GMAIL_USER')
 RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
+
+# Candados para sincronización entre hilos
+lock_csv = threading.Lock()
+lock_key = threading.Lock()
+current_key_idx = 0
 
 # ==========================================
 # LIMPIEZA DE ASUNTO SIN MUTILACIÓN
@@ -66,9 +70,6 @@ def limpiar_asunto(asunto_raw, texto_doc=""):
     t = re.sub(r'^[\.\-\–—:,;\s]+', '', t).strip()
     return t if t else str(asunto_raw).strip()
 
-# ==========================================
-# INSUMOS DE IMAGEN Y TEXTO
-# ==========================================
 def obtener_insumos_documento(ruta_pdf):
     try:
         doc = fitz.open(ruta_pdf)
@@ -118,19 +119,16 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
         return f"{int(m3.group(1)):02d}/{meses_map[m3.group(2)]}/{anio}"
     return fecha_str
 
-# ==============================================================================
-# PROMPT AUDITOR LITERAL
-# ==============================================================================
 PROMPT_AUDITORIA = """
 Eres un auditor archivístico experto en correspondencia.
 Tu única misión es transcribir EXACTA y TÁCITAMENTE lo que ves en el documento, actuando como un espejo literal. PROHIBIDO SUPONER O INVENTAR DATOS.
 
 REGLAS CRÍTICAS:
-1. "RAZON_SOCIAL_DESTINATARIO": Transcribe de manera literal la entidad a la que va dirigida la carta (quien aparece después de "Señores:" o "Dirigido a:"). Ejemplos: "AGENCIA NACIONAL DE INFRAESTRUCTURA", "CONCESIÓN ALTO MAGDALENA S.A.S.", "GOBERNACIÓN DE CUNDINAMARCA". ¡Copia el texto idéntico!
+1. "RAZON_SOCIAL_DESTINATARIO": Transcribe literal la entidad a la que va dirigida la carta (después de "Señores:" o "Dirigido a:").
 2. "RAZON_SOCIAL_REMITENTE": La entidad que emite y firma la carta o cuyo logo está en el membrete superior.
-3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía. (Si hay un sticker que dice "ALMA-2016-0003869", TRANSCRIBE CON TODOS LOS CEROS EXACTOS). En cartas de Consorcio 4C, será un código GP-XXXX (ej. GP-6063).
-4. "NO_RADICADO_DESTINATARIO": El número de radicado o sello colocado por quien recibe (Sticker de la ANI, código de barras, o el sello GP de Consorcio 4C).
-5. "ASUNTO": Transcribe literal todo el texto real del asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
+3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869 con todos sus ceros, o GP-XXXX).
+4. "NO_RADICADO_DESTINATARIO": El radicado o sello colocado por quien recibe (Sticker ANI, código de barras, sello GP).
+5. "ASUNTO": Transcribe literal el asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
 6. "FECHA": Formato DD/MM/AAAA.
 
 JSON REQUERIDO:
@@ -152,11 +150,6 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-# ==============================================================================
-# MOTOR 100% GEMINI CON ROTACIÓN DE CLAVES Y RECUPERACIÓN AUTOMÁTICA
-# ==============================================================================
-current_key_idx = 0
-
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx
     if not gemini_clients or not img_bytes:
@@ -169,10 +162,10 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     modelos_gemini = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
     total_keys = len(gemini_clients)
 
-    # Intentar rotar entre las claves si alguna se satura
     for intento_key in range(total_keys):
-        idx = (current_key_idx + intento_key) % total_keys
-        nombre_key, client = gemini_clients[idx]
+        with lock_key:
+            idx = (current_key_idx + intento_key) % total_keys
+            nombre_key, client = gemini_clients[idx]
 
         for mod in modelos_gemini:
             try:
@@ -182,18 +175,14 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                    print(f"      ♊ Transcripción Gemini ({nombre_key} | {mod})")
-                    # Avanza la clave para el próximo documento (Round-Robin)
-                    current_key_idx = (idx + 1) % total_keys
+                    with lock_key:
+                        current_key_idx = (idx + 1) % total_keys
                     return d
             except Exception as e:
                 err = str(e)
                 if "429" in err or "503" in err or "RESOURCE_EXHAUSTED" in err:
-                    print(f"      ⚠️ {nombre_key} saturada ({mod}). Saltando inmediatamente a otra clave...")
-                    break  # Sale del bucle de modelos para cambiar de clave de inmediato
+                    break
                 continue
-
-    print("      ❌ Ninguna de las claves de Gemini pudo procesar este documento.")
     return {}
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
@@ -230,175 +219,4 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
         else:
             m_alma = re.search(r'\b(ALMA[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
             m_cssa = re.search(r'\b(CSSA\d{6,14})\b', texto_completo, re.IGNORECASE)
-            m_ani = re.search(r'\b(20\d{2}-\d{3}-\d{6}-\d|\d{4}-\d{3}-\d+)\b', texto_completo)
-
-            if m_cssa: rad_rem = m_cssa.group(1)
-            elif m_alma: rad_rem = m_alma.group(1).replace(' ', '-')
-            elif m_ani: rad_rem = m_ani.group(1)
-            else: rad_rem = "SIN RADICADO REMITENTE"
-
-    if not is_valid(rad_dest):
-        if tipo_flujo == "ENVIADAS":
-            m_ani = re.search(r'\b(20\d{2}-\d{3}-\d{6}-\d)\b', texto_completo)
-            m_super = re.search(r'\b(2018560\d{7}|20\d{12})\b', texto_completo)
-            m_alma_r = re.search(r'\b(ALMA-R[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
-
-            if m_ani: rad_dest = m_ani.group(1)
-            elif m_super: rad_dest = m_super.group(1)
-            elif m_alma_r: rad_dest = m_alma_r.group(1).replace(' ', '-')
-            else: rad_dest = "SIN RADICADO CONSTATADO"
-        else:
-            m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
-            if m_gp: rad_dest = f"GP-{m_gp.group(1)}"
-            else: rad_dest = "SIN RADICADO CONSTATADO"
-
-    if tipo_flujo == "ENVIADAS" and rad_rem.startswith("GP-") and len(rad_rem) > 7:
-        rad_rem = rad_rem[:7]
-
-    if rad_rem == rad_dest and is_valid(rad_rem):
-        if tipo_flujo == "RECIBIDAS": rad_rem = "SIN RADICADO REMITENTE"
-        else: rad_dest = "SIN RADICADO CONSTATADO"
-
-    datos["NO_RADICADO_REMITENTE"] = rad_rem
-    datos["NO_RADICADO_DESTINATARIO"] = rad_dest
-    datos["ASUNTO"] = limpiar_asunto(ia_asunto, texto_completo)
-
-    if not is_valid(ia_fecha) or "2105" in ia_fecha or "01/01/" in ia_fecha:
-        m_f = re.search(r'(?:Bogot[aá]\s*D\.?C\.?,?\s*|Honda[^\n\r]*,?\s*|Girardot[^\n\r]*,?\s*|Fecha:\s*|FECHA:\s*)(\d{1,2}\s*(?:de|-)\s*[a-zA-Z]+\s*(?:de|-)\s*\d{2,4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
-        if m_f: datos["FECHA"] = normalizar_fecha(m_f.group(1), anio_defecto=anio_carpeta)
-        else: datos["FECHA"] = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
-    else:
-        datos["FECHA"] = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
-
-    return datos
-
-def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
-    archivos_encontrados = []
-    if not os.path.exists(ruta_base): return archivos_encontrados
-    for root, dirs, files in os.walk(ruta_base):
-        pdfs = [f for f in files if f.lower().endswith('.pdf')]
-        if not pdfs: continue
-        m_anio = re.search(r'\b(20\d{2})\b', root)
-        anio_detectado = m_anio.group(1) if m_anio else "GENERAL"
-        if procesar_anio and (anio_detectado != procesar_anio and f"/{procesar_anio}" not in root): continue
-        for pdf in pdfs: archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
-    return archivos_encontrados
-
-# ==============================================================================
-# PROCESO PRINCIPAL
-# ==============================================================================
-def procesar_archivos():
-    print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (100% GEMINI MULTI-KEY POOL)")
-    print("="*70)
-
-    es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
-    limite = None
-    procesar_anio = None
-
-    if es_prueba in ['si', 's', 'true']:
-        try:
-            limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
-        except Exception:
-            limite = 5
-        print(f"🎲 MODO PRUEBA: {limite} archivos AL AZAR por flujo.")
-        etiqueta = f"PRUEBA_{limite}_archivos"
-    else:
-        resp_alcance = os.environ.get('ALCANCE', 'todo').strip()
-        m_anio_dir = re.search(r'\b(20\d{2})\b', resp_alcance)
-        if m_anio_dir:
-            procesar_anio = m_anio_dir.group(1)
-            print(f"🎯 FILTRADO: Solo año {procesar_anio}.")
-            etiqueta = f"Año_{procesar_anio}"
-        else:
-            print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
-            etiqueta = "Completo"
-
-    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
-    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
-
-    if os.path.exists(ruta_memoria):
-        os.remove(ruta_memoria)
-        print(f"🧹 Memoria previa borrada automáticamente: {ruta_memoria}")
-    if os.path.exists(ruta_excel):
-        os.remove(ruta_excel)
-
-    print(f"✨ Iniciando ejecución limpia para: {etiqueta}\n")
-
-    item_counter = 1
-    flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
-
-    for tipo, ruta_raiz in flujos:
-        print(f"\n📂 Buscando en: {tipo}...")
-        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
-        print(f"   Encontrados {len(todos_los_pdfs)} PDFs.")
-
-        pendientes = todos_los_pdfs
-        if limite and len(pendientes) > limite:
-            pendientes = random.sample(pendientes, limite)
-            print(f"   🎲 Muestreo de prueba: se procesarán {len(pendientes)} PDFs al azar.")
-
-        for pdf, ruta_completa, anio_doc in pendientes:
-            t_inicio = time.time()
-            ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE)
-            print(f"📄 [{item_counter}] Procesando: {pdf}")
-
-            b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
-            datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
-            datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
-
-            duracion = round(time.time() - t_inicio, 2)
-            print(f"      ⏱️ Duración: {duracion} s")
-
-            fila = {
-                "ÍTEM": item_counter,
-                "DEL FOLIO/PAGINAS": paginas,
-                "RAZON SOCIAL REMITENTE": datos_completos.get("RAZON_SOCIAL_REMITENTE"),
-                "No. RADICADO REMITENTE": datos_completos.get("NO_RADICADO_REMITENTE"),
-                "RAZON SOCIAL DESTINATARIO": datos_completos.get("RAZON_SOCIAL_DESTINATARIO"),
-                "No. RADICADO DESTINATARIO": datos_completos.get("NO_RADICADO_DESTINATARIO"),
-                "FECHA (DD/MM/AAAA)": datos_completos.get("FECHA"),
-                "ASUNTO / TIPO DOCUMENTAL": datos_completos.get("ASUNTO"),
-                "UBICACION_ARCHIVO": ruta_relativa
-            }
-            pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
-            item_counter += 1
-            time.sleep(1.0) # Con 8 claves en paralelo, solo necesitamos 1 segundo de pausa
-
-    if os.path.exists(ruta_memoria):
-        pd.read_csv(ruta_memoria).to_excel(ruta_excel, index=False)
-        print(f"\n✅ EXCEL FINALIZADO EN:\n📁 {ruta_excel}")
-        enviar_correo_excel(ruta_excel, etiqueta)
-
-# ==============================================================================
-# ENVÍO AUTOMÁTICO DE CORREO
-# ==============================================================================
-def enviar_correo_excel(ruta_archivo, etiqueta):
-    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        print("⚠️ No se configuraron credenciales de correo. Omitiendo envío.")
-        return
-
-    nombre_bonito = etiqueta.replace("_", " ")
-    print("📧 Preparando correo para enviar a:", EMAIL_DESTINO)
-    msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - Excel Adjunto'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(f'Hola Eduardo,\n\nHa finalizado con éxito el proceso ({nombre_bonito}) usando el motor 100% Gemini.\nSe adjunta el archivo Excel.\n\nSaludos!')
-
-    try:
-        with open(ruta_archivo, 'rb') as f:
-            file_data = f.read()
-            file_name = os.path.basename(ruta_archivo)
-        
-        msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print("🚀 ¡CORREO ENVIADO CON ÉXITO!")
-    except Exception as e:
-        print(f"❌ Error al enviar el correo: {e}")
-
-if __name__ == "__main__":
-    procesar_archivos()
+            m_ani = re.search(r'\b(20\d{2}-\d{3}-\d{6}-\d|\d{4}-\d{3}-\d+)\b
