@@ -19,7 +19,7 @@ on:
         required: true
         default: '2017'
       reiniciar_memoria:
-        description: '¿Empezar desde cero y borrar memoria vieja? (si/no)'
+        description: '¿FORZAR reinicio desde cero borrando avance previo? (si/no)'
         type: choice
         options:
           - 'no'
@@ -30,10 +30,10 @@ jobs:
   run-python-script:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Permite guardar el salvavidas de memoria en GitHub
+      contents: write  # Permite guardar el avance de memoria en GitHub
 
     steps:
-      - name: Descargar el repositorio
+      - name: Descargar repositorio y memoria previa
         uses: actions/checkout@v4
 
       - name: Instalar Python
@@ -76,12 +76,12 @@ jobs:
             rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_recibidas.txt
             rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from lista_recibidas.txt -v
           else
-            echo "🚀 MODO PRODUCCIÓN: Descargando todos los PDFs..."
+            echo "🚀 MODO PRODUCCIÓN: Sincronizando PDFs..."
             rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "$FILTRO" -v
             rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
           fi
 
-      - name: Ejecutar la IA de Tabulación (Turbo Multi-hilo)
+      - name: Ejecutar la IA de Tabulación (Turbo Multi-Hilo)
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -92,12 +92,13 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      # Salvavidas: Se ejecuta SIEMPRE para guardar el avance si se interrumpe
-      - name: Guardar Checkpoint de Memoria
+      # SALVAVIDAS: Guarda el progreso pase lo que pase para reanudar luego
+      - name: Guardar Checkpoint de Memoria en GitHub
         if: always()
         run: |
           git config --global user.name "Bot-Memoria"
           git config --global user.email "bot@github.com"
+          git pull --rebase origin main || true
           git add RESTREPO_2_IA_memoria_*.csv || true
-          git commit -m "Guardar avance de memoria automático" || true
-          git push || true
+          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios nuevos para guardar"
+          git push origin main || true
