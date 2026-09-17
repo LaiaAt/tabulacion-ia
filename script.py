@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MODO 100% REFLEJO LITERAL Y TÁCITO)
-# AUTO-LIMPIEZA DE MEMORIA: NUNCA MÁS BORRAR A MANO
+# SISTEMA DE TABULACIÓN RESTREPO_2 (100% GEMINI MULTI-KEY POOL ENGINE)
+# BALANCING: 8 CLAVES API ROTATIVAS | AUTO-RECUPERACIÓN 429 | CERO BASURA
 # ==============================================================================
 
 import os
@@ -17,35 +17,29 @@ import requests
 import pymupdf as fitz
 from PIL import Image
 import io
-from groq import Groq
 from google import genai
 from google.genai import types
 
-print("⏳ [1/3] Cargando APIs desde Secrets...")
+# ==============================================================================
+# INICIALIZACIÓN DEL POOL DE CLAVES GEMINI
+# ==============================================================================
+print("⏳ [1/3] Cargando Pool de Claves Gemini...")
 
-gemini_client = None
-k_gemini = os.environ.get('GEMINI_API_KEY')
-if k_gemini:
+raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
+lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
+
+gemini_clients = []
+for i, k in enumerate(lista_keys, 1):
     try:
-        gemini_client = genai.Client(api_key=k_gemini.strip())
-        print("✅ GEMINI listo (Prioridad 1).")
+        c = genai.Client(api_key=k)
+        gemini_clients.append((f"Key-{i}", c))
     except Exception as e:
-        print(f"⚠️ Error iniciando Gemini: {e}")
+        print(f"⚠️ Error cargando clave Gemini #{i}: {e}")
 
-kimi_key = None
-k_kimi = os.environ.get('KIMI_API_KEY') or os.environ.get('MOONSHOT_API_KEY')
-if k_kimi:
-    kimi_key = k_kimi.strip()
-    print("✅ KIMI listo (Prioridad 2).")
-
-groq_client = None
-k_groq = os.environ.get('GROQ_API_KEY')
-if k_groq:
-    try:
-        groq_client = Groq(api_key=k_groq.strip())
-        print("✅ GROQ listo (Prioridad 3).")
-    except Exception as e:
-        print(f"⚠️ Error iniciando Groq: {e}")
+if gemini_clients:
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} clientes/claves rotativas.")
+else:
+    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.")
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -158,53 +152,48 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
+# ==============================================================================
+# MOTOR 100% GEMINI CON ROTACIÓN DE CLAVES Y RECUPERACIÓN AUTOMÁTICA
+# ==============================================================================
+current_key_idx = 0
+
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
-    es_escaneado = len(texto_digital.strip()) < 60
+    global current_key_idx
+    if not gemini_clients or not img_bytes:
+        return {}
+
     apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
+    part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
-    if gemini_client and img_bytes:
-        modelos_gemini = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    modelos_gemini = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    total_keys = len(gemini_clients)
+
+    # Intentar rotar entre las claves si alguna se satura
+    for intento_key in range(total_keys):
+        idx = (current_key_idx + intento_key) % total_keys
+        nombre_key, client = gemini_clients[idx]
+
         for mod in modelos_gemini:
-            for intento in range(2):
-                try:
-                    part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
-                    r = gemini_client.models.generate_content(
-                        model=mod, contents=[part_img, prompt_final],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
-                    )
-                    d = parsear_json(r.text)
-                    if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                        print(f"      ♊ Transcripción Gemini ({mod})")
-                        return d
-                except Exception as e:
-                    if ("429" in str(e) or "503" in str(e)) and intento == 0: 
-                        time.sleep(2.5)
-                        continue
-                    break
-
-    if kimi_key and b64_img:
-        for mod_k in ["kimi-k3", "kimi-k2.6"]:
             try:
-                r = requests.post("https://api.moonshot.ai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {kimi_key}", "Content-Type": "application/json"},
-                    json={"model": mod_k, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt_final}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}]}], "temperature": 0.0}, timeout=30)
-                if r.status_code == 200:
-                    d = parsear_json(r.json()["choices"][0]["message"]["content"])
-                    if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                        print(f"      🌙 Transcripción Kimi ({mod_k})")
-                        return d
-            except Exception: pass
-
-    if groq_client and not es_escaneado:
-        for mod_g in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
-            try:
-                res = groq_client.chat.completions.create(messages=[{"role": "user", "content": prompt_final}], model=mod_g, response_format={"type": "json_object"}, temperature=0.0)
-                d = parsear_json(res.choices[0].message.content)
+                r = client.models.generate_content(
+                    model=mod, contents=[part_img, prompt_final],
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                )
+                d = parsear_json(r.text)
                 if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
-                    print(f"      ⚡ Transcripción Groq ({mod_g})")
+                    print(f"      ♊ Transcripción Gemini ({nombre_key} | {mod})")
+                    # Avanza la clave para el próximo documento (Round-Robin)
+                    current_key_idx = (idx + 1) % total_keys
                     return d
-            except Exception: pass
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "503" in err or "RESOURCE_EXHAUSTED" in err:
+                    print(f"      ⚠️ {nombre_key} saturada ({mod}). Saltando inmediatamente a otra clave...")
+                    break  # Sale del bucle de modelos para cambiar de clave de inmediato
+                continue
+
+    print("      ❌ Ninguna de las claves de Gemini pudo procesar este documento.")
     return {}
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
@@ -296,11 +285,11 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
     return archivos_encontrados
 
 # ==============================================================================
-# PROCESO PRINCIPAL (CON AUTO-LIMPIEZA TOTAL)
+# PROCESO PRINCIPAL
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (AUTO-LIMPIEZA Y TABULACIÓN IA)")
+    print(" MOTOR RESTREPO_2 (100% GEMINI MULTI-KEY POOL)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -325,18 +314,16 @@ def procesar_archivos():
             print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
             etiqueta = "Completo"
 
-    # Nombres dinámicos de los archivos para esta corrida específica
     ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
     ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
 
-    # 🧹 AUTO-LIMPIEZA AUTOMÁTICA: Si existía memoria vieja, se borra sola
     if os.path.exists(ruta_memoria):
         os.remove(ruta_memoria)
         print(f"🧹 Memoria previa borrada automáticamente: {ruta_memoria}")
     if os.path.exists(ruta_excel):
         os.remove(ruta_excel)
 
-    print(f"✨ Iniciando con memoria 100% nueva y limpia para: {etiqueta}\n")
+    print(f"✨ Iniciando ejecución limpia para: {etiqueta}\n")
 
     item_counter = 1
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
@@ -376,7 +363,7 @@ def procesar_archivos():
             }
             pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
             item_counter += 1
-            time.sleep(2.0)
+            time.sleep(1.0) # Con 8 claves en paralelo, solo necesitamos 1 segundo de pausa
 
     if os.path.exists(ruta_memoria):
         pd.read_csv(ruta_memoria).to_excel(ruta_excel, index=False)
@@ -397,7 +384,7 @@ def enviar_correo_excel(ruta_archivo, etiqueta):
     msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - Excel Adjunto'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
-    msg.set_content(f'Hola Eduardo,\n\nHa finalizado con éxito el proceso ({nombre_bonito}).\nSe adjunta el Excel generado.\n\nSaludos!')
+    msg.set_content(f'Hola Eduardo,\n\nHa finalizado con éxito el proceso ({nombre_bonito}) usando el motor 100% Gemini.\nSe adjunta el archivo Excel.\n\nSaludos!')
 
     try:
         with open(ruta_archivo, 'rb') as f:
