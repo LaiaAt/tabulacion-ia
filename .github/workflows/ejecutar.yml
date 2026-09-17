@@ -18,12 +18,19 @@ on:
         description: '¿Tabular todo o un año específico? (Escribe "todo" o el año, ej. "2017")'
         required: true
         default: '2017'
+      reiniciar_memoria:
+        description: '¿Empezar desde cero y borrar memoria vieja? (si/no)'
+        type: choice
+        options:
+          - 'no'
+          - 'si'
+        default: 'no'
 
 jobs:
   run-python-script:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Permiso para guardar la memoria en caso de corte
+      contents: write  # Permite guardar el salvavidas de memoria en GitHub
 
     steps:
       - name: Descargar el repositorio
@@ -62,7 +69,7 @@ jobs:
           fi
 
           if [ "${{ inputs.es_prueba }}" = "si" ]; then
-            echo "🎲 MODO PRUEBA: Sorteando ${{ inputs.limite_prueba }} archivos..."
+            echo "🎲 MODO PRUEBA: Sorteando ${{ inputs.limite_prueba }} archivos en la nube..."
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_enviadas.txt
             rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from lista_enviadas.txt -v
 
@@ -74,17 +81,18 @@ jobs:
             rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
           fi
 
-      - name: Ejecutar la IA de Tabulación (Multi-hilo)
+      - name: Ejecutar la IA de Tabulación (Turbo Multi-hilo)
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           ALCANCE: ${{ inputs.alcance }}
+          REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      # Salvavidas: Si se corta el tiempo o se cancela, guarda la memoria para reanudar luego
+      # Salvavidas: Se ejecuta SIEMPRE para guardar el avance si se interrumpe
       - name: Guardar Checkpoint de Memoria
         if: always()
         run: |
