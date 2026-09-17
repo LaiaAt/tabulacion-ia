@@ -22,6 +22,8 @@ on:
 jobs:
   run-python-script:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Permiso para guardar la memoria en caso de corte
 
     steps:
       - name: Descargar el repositorio
@@ -60,7 +62,7 @@ jobs:
           fi
 
           if [ "${{ inputs.es_prueba }}" = "si" ]; then
-            echo "🎲 MODO PRUEBA: Sorteando solo ${{ inputs.limite_prueba }} archivos al azar en la nube..."
+            echo "🎲 MODO PRUEBA: Sorteando ${{ inputs.limite_prueba }} archivos..."
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_enviadas.txt
             rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from lista_enviadas.txt -v
 
@@ -72,7 +74,7 @@ jobs:
             rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
           fi
 
-      - name: Ejecutar la IA de Tabulación (Pool de 8 Gemini)
+      - name: Ejecutar la IA de Tabulación (Multi-hilo)
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -81,3 +83,13 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
+
+      # Salvavidas: Guarda la memoria pase lo que pase (incluso si se cancela o falla)
+      - name: Guardar Checkpoint de Memoria
+        if: always()
+        run: |
+          git config --global user.name "Bot-Memoria"
+          git config --global user.email "bot@github.com"
+          git add RESTREPO_2_IA_memoria_*.csv || true
+          git commit -m "Guardar avance de memoria automático" || true
+          git push || true
