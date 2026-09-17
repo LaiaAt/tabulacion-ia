@@ -84,7 +84,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      # Salvavidas: Guarda la memoria pase lo que pase (incluso si se cancela o falla)
+      # Salvavidas: Si se corta el tiempo o se cancela, guarda la memoria para reanudar luego
       - name: Guardar Checkpoint de Memoria
         if: always()
         run: |
