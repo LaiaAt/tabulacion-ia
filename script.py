@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MULTI-HILO + SALVAVIDAS)
-# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | REANUDACIÓN AUTOMÁTICA
+# SISTEMA DE TABULACIÓN RESTREPO_2 (TURBO MULTI-HILO + REANUDACIÓN INCREMENTAL)
+# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | SALVAVIDAS ANTI-CANCELACIÓN
 # ==============================================================================
 
 import os
@@ -51,14 +51,14 @@ RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
-# Candados de sincronización entre hilos
+# Candados de concurrencia segura
 lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
 
-# ==============================================================================
+# ==========================================
 # LIMPIEZA DE ASUNTO SIN MUTILACIÓN
-# ==============================================================================
+# ==========================================
 def limpiar_asunto(asunto_raw, texto_doc=""):
     if not asunto_raw or str(asunto_raw).strip() in ["None", "N/A", ""]:
         m = re.search(r'ASUNTO\s*:\s*(.+?)(?=\n\s*(?:Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
@@ -73,9 +73,6 @@ def limpiar_asunto(asunto_raw, texto_doc=""):
     t = re.sub(r'^[\.\-\–—:,;\s]+', '', t).strip()
     return t if t else str(asunto_raw).strip()
 
-# ==============================================================================
-# INSUMOS DE IMAGEN Y TEXTO
-# ==============================================================================
 def obtener_insumos_documento(ruta_pdf):
     try:
         doc = fitz.open(ruta_pdf)
@@ -133,11 +130,11 @@ Eres un auditor archivístico experto en correspondencia.
 Tu única misión es transcribir EXACTA y TÁCITAMENTE lo que ves en el documento, actuando como un espejo literal. PROHIBIDO SUPONER O INVENTAR DATOS.
 
 REGLAS CRÍTICAS:
-1. "RAZON_SOCIAL_DESTINATARIO": Transcribe de manera literal la entidad a la que va dirigida la carta (quien aparece después de "Señores:" o "Dirigido a:"). Ejemplos: "AGENCIA NACIONAL DE INFRAESTRUCTURA", "CONCESIÓN ALTO MAGDALENA S.A.S.", "GOBERNACIÓN DE CUNDINAMARCA". ¡Copia el texto idéntico!
+1. "RAZON_SOCIAL_DESTINATARIO": Transcribe literal la entidad a la que va dirigida la carta (después de "Señores:" o "Dirigido a:").
 2. "RAZON_SOCIAL_REMITENTE": La entidad que emite y firma la carta o cuyo logo está en el membrete superior.
-3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía. (Si hay un sticker que dice "ALMA-2016-0003869", TRANSCRIBE CON TODOS LOS CEROS EXACTOS). En cartas de Consorcio 4C, será un código GP-XXXX (ej. GP-6063).
-4. "NO_RADICADO_DESTINATARIO": El número de radicado o sello colocado por quien recibe (Sticker de la ANI, código de barras, o el sello GP de Consorcio 4C).
-5. "ASUNTO": Transcribe literal todo el texto real del asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
+3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869 con todos sus ceros, o GP-XXXX).
+4. "NO_RADICADO_DESTINATARIO": El radicado o sello colocado por quien recibe (Sticker ANI, código de barras, sello GP).
+5. "ASUNTO": Transcribe literal el asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
 6. "FECHA": Formato DD/MM/AAAA.
 
 JSON REQUERIDO:
@@ -160,7 +157,7 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# MOTOR GEMINI CON ROTACIÓN SEGURA
+# CONSULTA A GEMINI CON ROTACIÓN SEGURA
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx
@@ -193,7 +190,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception as e:
                 err = str(e)
                 if "429" in err or "503" in err or "RESOURCE_EXHAUSTED" in err:
-                    break  # Cambia a la siguiente clave API de inmediato
+                    break
                 continue
     return {}
 
@@ -283,22 +280,24 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
         for pdf in pdfs: archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
-# Lee memoria existente para no repetir documentos
+# ==============================================================================
+# MOTOR DE MEMORIA INCREMENTAL (REANUDACIÓN SEGURA)
+# ==============================================================================
 def cargar_memoria_existente(ruta_csv):
     if os.path.exists(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                procesados = set(df["UBICACION_ARCHIVO"].dropna())
+                procesados = set(df["UBICACION_ARCHIVO"].dropna().astype(str).str.strip())
                 item_sig = int(df["ÍTEM"].max()) + 1 if "ÍTEM" in df.columns else len(df) + 1
                 return procesados, item_sig
-        except Exception: pass
+        except Exception as e:
+            print(f"⚠️ Aviso al leer memoria existente: {e}")
     return set(), 1
 
-# Procesamiento individual de cada archivo ejecutado en paralelo
 def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     t_inicio = time.time()
-    ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE)
+    ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
@@ -324,11 +323,11 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     return True
 
 # ==============================================================================
-# PROCESO PRINCIPAL TURBO MULTI-HILO
+# PROCESO PRINCIPAL TURBO CON SALVAVIDAS
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (TURBO MULTI-HILO + AUTO-REANUDACIÓN)")
+    print(" MOTOR RESTREPO_2 (TURBO MULTI-HILO + PERSISTENCIA INCREMENTAL)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -356,34 +355,47 @@ def procesar_archivos():
     ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
     ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
 
-    # Si se solicitó reinicio desde el menú de inicio
+    # Solo si el usuario eligió forzar reinicio en el menú de Actions
     reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
     if reiniciar:
         if os.path.exists(ruta_memoria):
             os.remove(ruta_memoria)
-            print(f"🧹 REINICIO SOLICITADO: Memoria borrada en el segundo 0.")
+            print(f"🧹 REINICIO FORZADO: Memoria previa eliminada para comenzar desde cero.")
         if os.path.exists(ruta_excel):
             os.remove(ruta_excel)
 
-    # Cargar memoria previa (Salvavidas para omitir los que ya estén listos)
+    # 1. Cargar lo que ya se tabuló en ejecuciones anteriores
     procesados, item_counter = cargar_memoria_existente(ruta_memoria)
-    if procesados:
-        print(f"🔄 MEMORIA DETECTADA: {len(procesados)} archivos ya procesados. Se omitirán automáticamente.")
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
+    total_pendientes_global = 0
 
     for tipo, ruta_raiz in flujos:
         print(f"\n📂 Buscando en: {tipo}...")
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
-        pendientes = [(p, r, a) for p, r, a in todos_los_pdfs if os.path.relpath(r, RUTA_BASE) not in procesados]
-        print(f"   Encontrados {len(todos_los_pdfs)} PDFs ({len(pendientes)} pendientes de procesar).")
+        
+        # Filtra omitiendo automáticamente los que ya están en el CSV
+        pendientes = []
+        for p, r, a in todos_los_pdfs:
+            rel_path = os.path.relpath(r, RUTA_BASE).strip()
+            if rel_path not in procesados:
+                pendientes.append((p, r, a))
+
+        ya_listos = len(todos_los_pdfs) - len(pendientes)
+        print(f"   Total en Drive: {len(todos_los_pdfs)} | Ya tabulados: {ya_listos} | Pendientes por hacer: {len(pendientes)}")
 
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
 
-        # 4 hilos concurrentes procesando al mismo tiempo
+        total_pendientes_global += len(pendientes)
+
+        if not pendientes:
+            print("   ✅ No hay archivos pendientes en esta carpeta. ¡Todo al día!")
+            continue
+
+        # 4 hilos en paralelo
         num_trabajadores = 4
-        print(f"🚀 Procesando con {num_trabajadores} hilos en paralelo...")
+        print(f"🚀 Procesando {len(pendientes)} cartas pendientes con {num_trabajadores} hilos en paralelo...")
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -393,20 +405,22 @@ def procesar_archivos():
                 item_counter += 1
 
             for f in as_completed(futuros):
-                pass  # Espera sincronizada a que los 4 hilos avancen juntos
+                pass
 
+    # Compilar Excel consolidado con todo lo que hay en memoria
     if os.path.exists(ruta_memoria):
         df_final = pd.read_csv(ruta_memoria)
-        if "ÍTEM" in df_final.columns:
-            df_final = df_final.sort_values(by="ÍTEM")
-        df_final.to_excel(ruta_excel, index=False)
-        print(f"\n✅ EXCEL FINALIZADO EN:\n📁 {ruta_excel}")
-        enviar_correo_excel(ruta_excel, etiqueta)
+        if not df_final.empty:
+            if "ÍTEM" in df_final.columns:
+                df_final = df_final.sort_values(by="ÍTEM")
+            df_final.to_excel(ruta_excel, index=False)
+            print(f"\n✅ EXCEL CONSOLIDADO ({len(df_final)} cartas en total) EN:\n📁 {ruta_excel}")
+            enviar_correo_excel(ruta_excel, etiqueta, len(df_final))
 
 # ==============================================================================
 # ENVÍO AUTOMÁTICO DE CORREO
 # ==============================================================================
-def enviar_correo_excel(ruta_archivo, etiqueta):
+def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         print("⚠️ No se configuraron credenciales de correo. Omitiendo envío.")
         return
@@ -414,10 +428,17 @@ def enviar_correo_excel(ruta_archivo, etiqueta):
     nombre_bonito = etiqueta.replace("_", " ")
     print("📧 Preparando correo para enviar a:", EMAIL_DESTINO)
     msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - Excel Adjunto'
+    msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - {total_filas} Cartas'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
-    msg.set_content(f'Hola Eduardo,\n\nHa finalizado con éxito el proceso ({nombre_bonito}) usando el motor turbo multi-hilo.\nSe adjunta el archivo Excel generado.\n\nSaludos!')
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'Ha finalizado el proceso de tabulación ({nombre_bonito}).\n'
+        f'Total de cartas consolidadas en este reporte: {total_filas}.\n'
+        f'Se adjunta el archivo Excel.\n\n'
+        f'Saludos,\n'
+        f'Tu Bot de Tabulación'
+    )
 
     try:
         with open(ruta_archivo, 'rb') as f:
@@ -429,7 +450,7 @@ def enviar_correo_excel(ruta_archivo, etiqueta):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("🚀 ¡CORREO ENVIADO CON ÉXITO!")
+        print("🚀 ¡CORREO ENVIADO CON ÉXITO A TU GMAIL!")
     except Exception as e:
         print(f"❌ Error al enviar el correo: {e}")
 
