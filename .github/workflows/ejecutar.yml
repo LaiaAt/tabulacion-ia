@@ -34,7 +34,7 @@ jobs:
 
       - name: Instalar librerías de Python
         run: |
-          pip install pymupdf groq google-genai pandas openpyxl requests Pillow
+          pip install pymupdf google-genai pandas openpyxl requests Pillow
 
       - name: Instalar conector de Google Drive (rclone)
         run: sudo apt-get install rclone
@@ -72,14 +72,12 @@ jobs:
             rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
           fi
 
-      - name: Ejecutar la IA de Tabulación
+      - name: Ejecutar la IA de Tabulación (Pool de 8 Gemini)
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           ALCANCE: ${{ inputs.alcance }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
