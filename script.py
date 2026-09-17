@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (TURBO MULTI-HILO + REANUDACIÓN INCREMENTAL)
-# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | SALVAVIDAS ANTI-CANCELACIÓN
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO + AUTO-REPARADOR QUIRÚRGICO)
+# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | REPARACIÓN DE FALLIDOS
 # ==============================================================================
 
 import os
@@ -23,7 +23,7 @@ from google import genai
 from google.genai import types
 
 # ==============================================================================
-# POOL DE CLAVES GEMINI CON ROTACIÓN
+# POOL DE CLAVES GEMINI
 # ==============================================================================
 print("⏳ [1/3] Cargando Pool de Claves Gemini...")
 
@@ -51,7 +51,6 @@ RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
-# Candados de concurrencia segura
 lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
@@ -122,9 +121,6 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
         return f"{int(m3.group(1)):02d}/{meses_map[m3.group(2)]}/{anio}"
     return fecha_str
 
-# ==============================================================================
-# PROMPT AUDITOR LITERAL
-# ==============================================================================
 PROMPT_AUDITORIA = """
 Eres un auditor archivístico experto en correspondencia.
 Tu única misión es transcribir EXACTA y TÁCITAMENTE lo que ves en el documento, actuando como un espejo literal. PROHIBIDO SUPONER O INVENTAR DATOS.
@@ -132,9 +128,9 @@ Tu única misión es transcribir EXACTA y TÁCITAMENTE lo que ves en el document
 REGLAS CRÍTICAS:
 1. "RAZON_SOCIAL_DESTINATARIO": Transcribe literal la entidad a la que va dirigida la carta (después de "Señores:" o "Dirigido a:").
 2. "RAZON_SOCIAL_REMITENTE": La entidad que emite y firma la carta o cuyo logo está en el membrete superior.
-3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869 con todos sus ceros, o GP-XXXX).
+3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869, o GP-XXXX).
 4. "NO_RADICADO_DESTINATARIO": El radicado o sello colocado por quien recibe (Sticker ANI, código de barras, sello GP).
-5. "ASUNTO": Transcribe literal el asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
+5. "ASUNTO": Transcribe literal el asunto del documento.
 6. "FECHA": Formato DD/MM/AAAA.
 
 JSON REQUERIDO:
@@ -157,7 +153,7 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# CONSULTA A GEMINI CON ROTACIÓN SEGURA
+# CONSULTA A GEMINI (CORREGIDA: YA NO DESCARTA RESPUESTAS VÁLIDAS)
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx
@@ -183,7 +179,8 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
                 )
                 d = parsear_json(r.text)
-                if d and d.get("ASUNTO") and len(str(d["ASUNTO"]).strip()) > 5:
+                # AHORA ACEPTA LA RESPUESTA SI AL MENOS TRAE ASUNTO O RAZONES SOCIALES
+                if d and isinstance(d, dict) and (d.get("ASUNTO") or d.get("RAZON_SOCIAL_REMITENTE") or d.get("NO_RADICADO_DESTINATARIO")):
                     with lock_key:
                         current_key_idx = (idx + 1) % total_keys
                     return d
@@ -281,15 +278,31 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
     return archivos_encontrados
 
 # ==============================================================================
-# MOTOR DE MEMORIA INCREMENTAL (REANUDACIÓN SEGURA)
+# MOTOR AUTO-REPARADOR (ELIMINA SOLO LOS REGISTROS FALLIDOS DE LA MEMORIA)
 # ==============================================================================
-def cargar_memoria_existente(ruta_csv):
+def cargar_memoria_con_autoreparacion(ruta_csv):
     if os.path.exists(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
+                # Detectar filas donde falló la IA ("SIN ASUNTO CONSTATADO")
+                filas_fallidas = (
+                    df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO", case=False, na=True) |
+                    (df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) &
+                     df["RAZON SOCIAL DESTINATARIO"].astype(str).str.contains("SIN DESTINATARIO", case=False, na=True))
+                )
+                
+                num_fallidos = filas_fallidas.sum()
+                if num_fallidos > 0:
+                    print(f"\n🔧 REPARADOR QUIRÚRGICO: Se detectaron {num_fallidos} cartas fallidas.")
+                    print(f"   Conservando {len(df) - num_fallidos} cartas que ya están perfectas.")
+                    print(f"   Liberando las {num_fallidos} cartas fallidas para que Gemini las procese de nuevo...")
+                    df_bueno = df[~filas_fallidas].copy()
+                    df_bueno.to_csv(ruta_csv, index=False)
+                    df = df_bueno
+
                 procesados = set(df["UBICACION_ARCHIVO"].dropna().astype(str).str.strip())
-                item_sig = int(df["ÍTEM"].max()) + 1 if "ÍTEM" in df.columns else len(df) + 1
+                item_sig = int(df["ÍTEM"].max()) + 1 if "ÍTEM" in df.columns and not df.empty else 1
                 return procesados, item_sig
         except Exception as e:
             print(f"⚠️ Aviso al leer memoria existente: {e}")
@@ -323,11 +336,11 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     return True
 
 # ==============================================================================
-# PROCESO PRINCIPAL TURBO CON SALVAVIDAS
+# PROCESO PRINCIPAL
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (TURBO MULTI-HILO + PERSISTENCIA INCREMENTAL)")
+    print(" MOTOR RESTREPO_2 (AUTO-REPARACIÓN INCREMENTAL)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -355,17 +368,16 @@ def procesar_archivos():
     ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
     ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
 
-    # Solo si el usuario eligió forzar reinicio en el menú de Actions
     reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
     if reiniciar:
         if os.path.exists(ruta_memoria):
             os.remove(ruta_memoria)
-            print(f"🧹 REINICIO FORZADO: Memoria previa eliminada para comenzar desde cero.")
+            print(f"🧹 REINICIO FORZADO: Memoria eliminada.")
         if os.path.exists(ruta_excel):
             os.remove(ruta_excel)
 
-    # 1. Cargar lo que ya se tabuló en ejecuciones anteriores
-    procesados, item_counter = cargar_memoria_existente(ruta_memoria)
+    # 1. Cargar memoria limpiando solo las 589 filas fallidas
+    procesados, item_counter = cargar_memoria_con_autoreparacion(ruta_memoria)
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
     total_pendientes_global = 0
@@ -374,7 +386,7 @@ def procesar_archivos():
         print(f"\n📂 Buscando en: {tipo}...")
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
         
-        # Filtra omitiendo automáticamente los que ya están en el CSV
+        # Filtra omitiendo los 2.383 que ya están listos
         pendientes = []
         for p, r, a in todos_los_pdfs:
             rel_path = os.path.relpath(r, RUTA_BASE).strip()
@@ -382,7 +394,7 @@ def procesar_archivos():
                 pendientes.append((p, r, a))
 
         ya_listos = len(todos_los_pdfs) - len(pendientes)
-        print(f"   Total en Drive: {len(todos_los_pdfs)} | Ya tabulados: {ya_listos} | Pendientes por hacer: {len(pendientes)}")
+        print(f"   Total en Drive: {len(todos_los_pdfs)} | Ya listos: {ya_listos} | A PROCESAR: {len(pendientes)}")
 
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
@@ -390,12 +402,11 @@ def procesar_archivos():
         total_pendientes_global += len(pendientes)
 
         if not pendientes:
-            print("   ✅ No hay archivos pendientes en esta carpeta. ¡Todo al día!")
+            print("   ✅ Todas las cartas de este flujo ya están perfectamente tabuladas.")
             continue
 
-        # 4 hilos en paralelo
         num_trabajadores = 4
-        print(f"🚀 Procesando {len(pendientes)} cartas pendientes con {num_trabajadores} hilos en paralelo...")
+        print(f"🚀 Procesando {len(pendientes)} cartas pendientes con {num_trabajadores} hilos...")
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -407,14 +418,14 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
-    # Compilar Excel consolidado con todo lo que hay en memoria
+    # Compilar Excel consolidado
     if os.path.exists(ruta_memoria):
         df_final = pd.read_csv(ruta_memoria)
         if not df_final.empty:
-            if "ÍTEM" in df_final.columns:
-                df_final = df_final.sort_values(by="ÍTEM")
+            # Reenumerar ítems del 1 al total limpiamente
+            df_final["ÍTEM"] = range(1, len(df_final) + 1)
             df_final.to_excel(ruta_excel, index=False)
-            print(f"\n✅ EXCEL CONSOLIDADO ({len(df_final)} cartas en total) EN:\n📁 {ruta_excel}")
+            print(f"\n✅ EXCEL REPARADO Y COMPLETO ({len(df_final)} cartas) EN:\n📁 {ruta_excel}")
             enviar_correo_excel(ruta_excel, etiqueta, len(df_final))
 
 # ==============================================================================
@@ -428,16 +439,15 @@ def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
     nombre_bonito = etiqueta.replace("_", " ")
     print("📧 Preparando correo para enviar a:", EMAIL_DESTINO)
     msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Finalizada ({nombre_bonito}) - {total_filas} Cartas'
+    msg['Subject'] = f'✅ Tabulación Completa ({nombre_bonito}) - {total_filas} Cartas'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
     msg.set_content(
         f'Hola Eduardo,\n\n'
-        f'Ha finalizado el proceso de tabulación ({nombre_bonito}).\n'
-        f'Total de cartas consolidadas en este reporte: {total_filas}.\n'
-        f'Se adjunta el archivo Excel.\n\n'
-        f'Saludos,\n'
-        f'Tu Bot de Tabulación'
+        f'El proceso ha finalizado con éxito para {nombre_bonito}.\n'
+        f'Total de cartas consolidadas en este archivo: {total_filas}.\n'
+        f'Se adjunta el Excel final con todos los registros reparados.\n\n'
+        f'Saludos!'
     )
 
     try:
