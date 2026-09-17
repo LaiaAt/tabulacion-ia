@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MULTI-HILO + SALVAVIDAS)
-# 4 HILOS PARALELOS | 14 CLAVES GEMINI | REANUDACIÓN AUTOMÁTICA
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MULTI-HILO + REANUDACIÓN)
+# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | SALVAVIDAS ANTI-CANCELACIÓN
 # ==============================================================================
 
 import os
@@ -48,7 +48,7 @@ RUTA_BASE = '.'
 RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
-# Candados para sincronización entre hilos
+# Candados para concurrencia entre hilos
 lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
@@ -124,11 +124,11 @@ Eres un auditor archivístico experto en correspondencia.
 Tu única misión es transcribir EXACTA y TÁCITAMENTE lo que ves en el documento, actuando como un espejo literal. PROHIBIDO SUPONER O INVENTAR DATOS.
 
 REGLAS CRÍTICAS:
-1. "RAZON_SOCIAL_DESTINATARIO": Transcribe literal la entidad a la que va dirigida la carta (después de "Señores:" o "Dirigido a:").
+1. "RAZON_SOCIAL_DESTINATARIO": Transcribe de manera literal la entidad a la que va dirigida la carta (quien aparece después de "Señores:" o "Dirigido a:"). Ejemplos: "AGENCIA NACIONAL DE INFRAESTRUCTURA", "CONCESIÓN ALTO MAGDALENA S.A.S.", "GOBERNACIÓN DE CUNDINAMARCA". ¡Copia el texto idéntico!
 2. "RAZON_SOCIAL_REMITENTE": La entidad que emite y firma la carta o cuyo logo está en el membrete superior.
-3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869 con todos sus ceros, o GP-XXXX).
-4. "NO_RADICADO_DESTINATARIO": El radicado o sello colocado por quien recibe (Sticker ANI, código de barras, sello GP).
-5. "ASUNTO": Transcribe literal el asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
+3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía. (Si hay un sticker que dice "ALMA-2016-0003869", TRANSCRIBE CON TODOS LOS CEROS EXACTOS). En cartas de Consorcio 4C, será un código GP-XXXX (ej. GP-6063).
+4. "NO_RADICADO_DESTINATARIO": El número de radicado o sello colocado por quien recibe (Sticker de la ANI, código de barras, o el sello GP de Consorcio 4C).
+5. "ASUNTO": Transcribe literal todo el texto real del asunto, omitiendo solo la frase genérica "REFERENCIA: Contrato de Concesión...".
 6. "FECHA": Formato DD/MM/AAAA.
 
 JSON REQUERIDO:
@@ -178,45 +178,3 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     with lock_key:
                         current_key_idx = (idx + 1) % total_keys
                     return d
-            except Exception as e:
-                err = str(e)
-                if "429" in err or "503" in err or "RESOURCE_EXHAUSTED" in err:
-                    break
-                continue
-    return {}
-
-def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
-    if not isinstance(datos, dict): datos = {}
-
-    def is_valid(val):
-        return val and str(val).strip().upper() not in ["", "NONE", "N/A", "NULL", "SIN RADICADO CONSTATADO", "SIN RADICADO REMITENTE", "SIN RADICADO DESTINATARIO", "NO ESPECIFICADA"]
-
-    ia_dest = str(datos.get("RAZON_SOCIAL_DESTINATARIO", "")).strip()
-    ia_rem = str(datos.get("RAZON_SOCIAL_REMITENTE", "")).strip()
-    ia_rad_rem = str(datos.get("NO_RADICADO_REMITENTE", "")).strip()
-    ia_rad_dest = str(datos.get("NO_RADICADO_DESTINATARIO", "")).strip()
-    ia_asunto = str(datos.get("ASUNTO", "")).strip()
-    ia_fecha = str(datos.get("FECHA", "")).strip()
-
-    datos["RAZON_SOCIAL_DESTINATARIO"] = ia_dest if is_valid(ia_dest) else "SIN DESTINATARIO CONSTATADO"
-    datos["RAZON_SOCIAL_REMITENTE"] = ia_rem if is_valid(ia_rem) else "SIN REMITENTE CONSTATADO"
-
-    rad_rem = ia_rad_rem if is_valid(ia_rad_rem) else ""
-    rad_dest = ia_rad_dest if is_valid(ia_rad_dest) else ""
-
-    if tipo_flujo == "RECIBIDAS" and rad_rem.startswith("GP-") and not rad_dest.startswith("GP-"):
-        rad_rem, rad_dest = rad_dest, rad_rem
-    elif tipo_flujo == "ENVIADAS" and rad_dest.startswith("GP-") and not rad_rem.startswith("GP-"):
-        rad_rem, rad_dest = rad_dest, rad_rem
-
-    if not is_valid(rad_rem):
-        if tipo_flujo == "ENVIADAS":
-            m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
-            m_txt = re.search(r'CI\.?004[/\s_]+(?:GP\s*)?0*(\d{1,4})[/\s_]', texto_completo, re.IGNORECASE)
-            if m_nom: rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
-            elif m_txt: rad_rem = f"GP-{m_txt.group(1).zfill(4)}"
-            else: rad_rem = "SIN RADICADO REMITENTE"
-        else:
-            m_alma = re.search(r'\b(ALMA[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
-            m_cssa = re.search(r'\b(CSSA\d{6,14})\b', texto_completo, re.IGNORECASE)
-            m_ani = re.search(r'\b(20\d{2}-\d{3}-\d{6}-\d|\d{4}-\d{3}-\d+)\b
