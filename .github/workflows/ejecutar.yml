@@ -14,8 +14,8 @@ on:
         description: 'Si es prueba, ¿cuántos archivos AL AZAR por flujo?'
         required: false
         default: '5'
-      alcance:
-        description: '¿Tabular todo o un año específico? (Escribe "todo" o el año, ej. "2017")'
+      carpeta_objetivo:
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2017" o "todo")'
         required: true
         default: '2017'
       reiniciar_memoria:
@@ -60,25 +60,26 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica (SOLO archivos pendientes o fallidos)
+      - name: Descarga Quirúrgica Profunda (Enviadas + Recibidas)
         run: |
-          if [ "${{ inputs.alcance }}" = "todo" ]; then
+          # Filtro con comodín doble '**/' para buscar en cualquier nivel de subcarpeta (ej. RADICADAS/2017)
+          if [ "${{ inputs.carpeta_objetivo }}" = "todo" ]; then
             FILTRO="**.[pP][dD][fF]"
           else
-            FILTRO="*${{ inputs.alcance }}*/**.[pP][dD][fF]"
+            FILTRO="**/*${{ inputs.carpeta_objetivo }}*/**.[pP][dD][fF]"
           fi
 
-          echo "Consultando archivos en Drive..."
+          echo "Consultando archivos en Drive con filtro profundo: $FILTRO"
           rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_enviadas.txt
           rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_recibidas.txt
 
           python -c "
           import os, pandas as pd
 
-          alcance = '${{ inputs.alcance }}'
+          carpeta = '${{ inputs.carpeta_objetivo }}'
           es_prueba = '${{ inputs.es_prueba }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
-          archivo_memoria = f'RESTREPO_2_IA_memoria_Año_{alcance}.csv'
+          archivo_memoria = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
           buenos_env = set()
           buenos_rec = set()
@@ -87,6 +88,7 @@ jobs:
               try:
                   df = pd.read_csv(archivo_memoria)
                   if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
+                      # Limpiar solo los registros con error
                       malos = (
                           df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO', case=False, na=True) |
                           (df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) &
@@ -95,7 +97,7 @@ jobs:
                       df_bueno = df[~malos]
                       df_bueno.to_csv(archivo_memoria, index=False)
                       print(f'✅ Memoria limpia: {len(df_bueno)} cartas buenas conservadas.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas con error para re-descargar y tabular.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas con error para re-descargar.')
 
                       for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                           r = str(ruta).strip().replace('\\\\', '/')
@@ -114,9 +116,9 @@ jobs:
           descargar_env = [x for x in drive_env if x not in buenos_env]
           descargar_rec = [x for x in drive_rec if x not in buenos_rec]
 
-          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
-          print(f'   - Enviadas a descargar: {len(descargar_env)}')
-          print(f'   - Recibidas a descargar: {len(descargar_rec)}')
+          print(f'\n🚀 DESCARGA DETECTADA:')
+          print(f'   - Enviadas a descargar (incluye RADICADAS): {len(descargar_env)}')
+          print(f'   - Recibidas a descargar (reparaciones): {len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
@@ -124,15 +126,15 @@ jobs:
               f.write('\n'.join(descargar_rec))
           "
 
-          # Descarga ÚNICAMENTE los archivos de las listas (los 537 restantes)
+          # Descarga solo los pendientes de Enviadas (entra a RADICADAS) y Recibidas
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación (Turbo Multi-Hilo)
+      - name: Ejecutar la IA de Tabulación
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
-          ALCANCE: ${{ inputs.alcance }}
+          CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
           REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
