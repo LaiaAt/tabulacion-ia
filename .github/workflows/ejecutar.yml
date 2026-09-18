@@ -65,7 +65,6 @@ jobs:
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
 
-          # Filtro dual: captura tanto la raíz como subcarpetas profundas (RADICADAS)
           if [ "$CARPETA" = "todo" ]; then
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
             rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
@@ -91,14 +90,15 @@ jobs:
                   if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
                       # Limpiar filas con textos de relleno anteriores
                       malos = (
-                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO', case=False, na=True) |
+                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO|CI004', case=False, na=True) |
                           df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) |
+                          df['RAZON SOCIAL DESTINATARIO'].astype(str).str.contains('SIN DESTINATARIO', case=False, na=True) |
                           (df['ASUNTO / TIPO DOCUMENTAL'].fillna('').str.strip() == '')
                       )
                       df_bueno = df[~malos]
                       df_bueno.to_csv(archivo_memoria, index=False)
-                      print(f'✅ Conservando {len(df_bueno)} cartas perfectamente tabuladas.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas defectuosas para re-tabular con la IA.')
+                      print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas con datos incompletos para re-tabular.')
 
                       for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                           r = str(ruta).strip().replace('\\\\', '/')
@@ -124,7 +124,7 @@ jobs:
               descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
 
           print(f'\n🚀 DESCARGA QUIRÚRGICA:')
-          print(f'   - Enviadas/Radicadas pendientes: {len(descargar_env)}')
+          print(f'   - Radicadas/Enviadas pendientes: {len(descargar_env)}')
           print(f'   - Recibidas pendientes: {len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
