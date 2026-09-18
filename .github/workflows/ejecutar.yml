@@ -30,7 +30,7 @@ jobs:
   run-python-script:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Permite guardar el avance de memoria en GitHub
+      contents: write
 
     steps:
       - name: Descargar repositorio y memoria previa
@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Inteligente de PDFs desde Drive
+      - name: Descarga Quirúrgica (SOLO archivos pendientes o fallidos)
         run: |
           if [ "${{ inputs.alcance }}" = "todo" ]; then
             FILTRO="**.[pP][dD][fF]"
@@ -68,18 +68,65 @@ jobs:
             FILTRO="*${{ inputs.alcance }}*/**.[pP][dD][fF]"
           fi
 
-          if [ "${{ inputs.es_prueba }}" = "si" ]; then
-            echo "🎲 MODO PRUEBA: Sorteando ${{ inputs.limite_prueba }} archivos en la nube..."
-            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_enviadas.txt
-            rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from lista_enviadas.txt -v
+          echo "Consultando archivos en Drive..."
+          rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_enviadas.txt
+          rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_recibidas.txt
 
-            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R | shuf -n "${{ inputs.limite_prueba }}" > lista_recibidas.txt
-            rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from lista_recibidas.txt -v
-          else
-            echo "🚀 MODO PRODUCCIÓN: Sincronizando PDFs..."
-            rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --include "$FILTRO" -v
-            rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --include "$FILTRO" -v
-          fi
+          python -c "
+          import os, pandas as pd
+
+          alcance = '${{ inputs.alcance }}'
+          es_prueba = '${{ inputs.es_prueba }}'
+          reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
+          archivo_memoria = f'RESTREPO_2_IA_memoria_Año_{alcance}.csv'
+
+          buenos_env = set()
+          buenos_rec = set()
+
+          if os.path.exists(archivo_memoria) and not reiniciar and es_prueba != 'si':
+              try:
+                  df = pd.read_csv(archivo_memoria)
+                  if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
+                      malos = (
+                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO', case=False, na=True) |
+                          (df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) &
+                           df['RAZON SOCIAL DESTINATARIO'].astype(str).str.contains('SIN DESTINATARIO', case=False, na=True))
+                      )
+                      df_bueno = df[~malos]
+                      df_bueno.to_csv(archivo_memoria, index=False)
+                      print(f'✅ Memoria limpia: {len(df_bueno)} cartas buenas conservadas.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas con error para re-descargar y tabular.')
+
+                      for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
+                          r = str(ruta).strip().replace('\\\\', '/')
+                          if '15_01_Cartas_Enviadas/' in r:
+                              buenos_env.add(r.split('15_01_Cartas_Enviadas/')[-1].strip())
+                          elif '15_04_Comunic_Recibidas/' in r:
+                              buenos_rec.add(r.split('15_04_Comunic_Recibidas/')[-1].strip())
+              except Exception as e:
+                  print(f'Aviso memoria: {e}')
+
+          with open('drive_enviadas.txt') as f:
+              drive_env = [line.strip() for line in f if line.strip()]
+          with open('drive_recibidas.txt') as f:
+              drive_rec = [line.strip() for line in f if line.strip()]
+
+          descargar_env = [x for x in drive_env if x not in buenos_env]
+          descargar_rec = [x for x in drive_rec if x not in buenos_rec]
+
+          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
+          print(f'   - Enviadas a descargar: {len(descargar_env)}')
+          print(f'   - Recibidas a descargar: {len(descargar_rec)}')
+
+          with open('descargar_enviadas.txt', 'w') as f:
+              f.write('\n'.join(descargar_env))
+          with open('descargar_recibidas.txt', 'w') as f:
+              f.write('\n'.join(descargar_rec))
+          "
+
+          # Descarga ÚNICAMENTE los archivos de las listas (los 537 restantes)
+          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
+          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
       - name: Ejecutar la IA de Tabulación (Turbo Multi-Hilo)
         env:
@@ -92,7 +139,6 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      # SALVAVIDAS: Guarda el progreso pase lo que pase para reanudar luego
       - name: Guardar Checkpoint de Memoria en GitHub
         if: always()
         run: |
@@ -100,5 +146,5 @@ jobs:
           git config --global user.email "bot@github.com"
           git pull --rebase origin main || true
           git add RESTREPO_2_IA_memoria_*.csv || true
-          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios nuevos para guardar"
+          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios nuevos"
           git push origin main || true
