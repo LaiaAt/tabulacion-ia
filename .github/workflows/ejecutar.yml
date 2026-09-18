@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Estricta (SOLO archivos con CONSTATADO o pendientes)
+      - name: Fusión de Memorias y Descarga Quirúrgica Estricta
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -79,51 +79,53 @@ jobs:
           carpeta = '${{ inputs.carpeta_objetivo }}'
           es_prueba = '${{ inputs.es_prueba }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
+          archivo_unificado = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
-          # Búsqueda universal del archivo de memoria (encuentra con o sin 'Año_')
-          posibles_archivos = [
-              f'RESTREPO_2_IA_memoria_Año_{carpeta}.csv',
-              f'RESTREPO_2_IA_memoria_{carpeta}.csv'
-          ]
-          archivo_memoria = next((f for f in posibles_archivos if os.path.exists(f)), posibles_archivos[0])
-
+          # 1. Buscar y fusionar todos los CSVs de memoria existentes para esta carpeta
+          archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
+          
           buenos_filenames = set()
 
-          if os.path.exists(archivo_memoria) and not reiniciar and es_prueba != 'si':
-              try:
-                  df = pd.read_csv(archivo_memoria)
-                  if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
-                      # REGLA EXACTA DE TU FÓRMULA DE EXCEL: Buscar 'CONSTATADO' en cualquier columna
-                      tiene_constatado = df.astype(str).apply(
-                          lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
-                      ).any(axis=1)
+          if archivos_memoria and not reiniciar and es_prueba != 'si':
+              dfs = []
+              for f_mem in archivos_memoria:
+                  try:
+                      d = pd.read_csv(f_mem)
+                      if not d.empty and 'UBICACION_ARCHIVO' in d.columns:
+                          dfs.append(d)
+                  except Exception as e:
+                      print(f'Aviso leyendo {f_mem}: {e}')
 
-                      asunto_invalido = (
-                          df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
-                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('CI004_', case=False, na=False)
-                      )
+              if dfs:
+                  df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
+                  
+                  # FÓRMULA DE EXCEL: Buscar CONSTATADO o SIN RADICADO en cualquier columna
+                  tiene_constatado = df.astype(str).apply(
+                      lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
+                  ).any(axis=1)
 
-                      malos = tiene_constatado | asunto_invalido
-                      df_bueno = df[~malos]
-                      df_bueno.to_csv(archivo_memoria, index=False)
+                  asunto_invalido = (
+                      df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
+                      df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('CI004_', case=False, na=False)
+                  )
 
-                      print(f'📄 Archivo de memoria procesado: {archivo_memoria}')
-                      print(f'✅ Conservando {len(df_bueno)} cartas que NO tienen CONSTATADO.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas con CONSTATADO para descargar y reparar.')
+                  malos = tiene_constatado | asunto_invalido
+                  df_bueno = df[~malos]
+                  df_bueno.to_csv(archivo_unificado, index=False)
 
-                      # Extraer únicamente el nombre limpio del archivo (basename)
-                      for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
-                          buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
-              except Exception as e:
-                  print(f'Aviso procesando memoria: {e}')
+                  print(f'✅ Memorias fusionadas: {len(df_bueno)} cartas buenas conservadas.')
+                  print(f'🎯 Detectadas {malos.sum()} cartas con CONSTATADO para re-descargar y reparar.')
 
-          # Leer los que existen en Drive
+                  for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
+                      buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
+
+          # 2. Leer archivos que existen en Drive
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
               todos_rec = [line.strip() for line in f if line.strip()]
 
-          # CRUCE POR NOMBRE EXACTO DE ARCHIVO (INFALIBLE)
+          # 3. Descargar ÚNICAMENTE los que no están en la lista de cartas buenas
           descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos_filenames]
           descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos_filenames]
 
@@ -136,7 +138,7 @@ jobs:
           print(f'\n🚀 DESCARGA QUIRÚRGICA REAL:')
           print(f'   - Enviadas/Radicadas a descargar: {len(descargar_env)}')
           print(f'   - Recibidas a descargar: {len(descargar_rec)}')
-          print(f'   (Las cartas buenas ya tabuladas NO se descargarán)')
+          print(f'   (Las {len(buenos_filenames)} cartas buenas NO se descargarán)')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
