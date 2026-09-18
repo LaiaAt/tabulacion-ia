@@ -1,7 +1,7 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO 8 HILOS | CERO EXPULSIONES)
-# TODAS LAS CLAVES SE MANTIENEN VIVAS | ROTACIÓN PURA | FLASH-LITE (2s)
-# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% REALES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CAMBIO REAL DE MODELOS IA + 31 CLAVES)
+# CASCADA POR MODELO: 3.5-LITE -> 3.1-LITE -> 3.5-FLASH -> 3.7-FLASH
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% PUROS Y LITERALES
 # ==============================================================================
 
 import os
@@ -41,7 +41,7 @@ for i, k in enumerate(lista_keys, 1):
         print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para trabajar a toda marcha.", flush=True)
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para trabajar.", flush=True)
 else:
     print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
 
@@ -117,7 +117,7 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
 PROMPT_AUDITORIA = """
 Eres un auditor archivístico experto.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento.
-PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO", "SIN REMITENTE", "SIN DESTINATARIO". Si algo no existe, déjalo vacío "".
+PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Quién emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "AGENCIA NACIONAL DE INFRAESTRUCTURA"). Mira logos o membrete superior.
@@ -146,6 +146,7 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
+# Modelos en orden de velocidad (Lite de 2 segundos primero)
 MODELOS_GEMINI_OFICIALES = [
     "gemini-3.5-flash-lite",  # ⚡ 1. Ultra rápido (1.5 a 2.5s)
     "gemini-3.1-flash-lite",  # ⚡ 2. Respaldo ultra veloz
@@ -154,7 +155,7 @@ MODELOS_GEMINI_OFICIALES = [
 ]
 
 # ==============================================================================
-# MOTOR CON ROTACIÓN CONTINUA (CERO EXPULSIONES | TODAS LAS CLAVES SE MANTIENEN)
+# MOTOR CON CAMBIO REAL DE MODELOS Y ROTACIÓN DE CLAVES
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
@@ -167,7 +168,6 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     total_keys = len(gemini_clients)
     start_idx = (item_num + hilo_id) % total_keys
 
-    # Prueba cada una de las 31 claves sin expulsar ninguna
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None, "", ""
@@ -175,6 +175,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
+        # 🔄 CASCADA DE MODELOS: Si un modelo se satura, PRUEBA EL SIGUIENTE MODELO
         for mod in MODELOS_GEMINI_OFICIALES:
             try:
                 r = client.models.generate_content(
@@ -186,10 +187,13 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     return d, nombre_key, mod
             except Exception as e:
                 err = str(e).upper()
-                # Si la clave está ocupada o da error temporal, salta inmediatamente a la siguiente
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "PERMISSION_DENIED", "403", "401"]):
-                    time.sleep(0.3)
-                    break  # Salta a la siguiente clave del pool sin expulsarla
+                # Si este modelo está saturado (429), CAMBIA AL SIGUIENTE MODELO sin salir de la clave
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                    # 👉 CAMBIA DE MODELO (continue en vez de break)
+                    continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    # Esta clave completa no tiene permisos, pasa a la siguiente clave
+                    break
                 else:
                     continue
 
@@ -336,7 +340,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (8 HILOS EN PARALELO | CERO EXPULSIONES)", flush=True)
+    print(" MOTOR RESTREPO_2 (CAMBIO REAL DE MODELOS IA + EXCEL 2 HOJAS)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
