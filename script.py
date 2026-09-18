@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO + AUTO-REPARADOR QUIRÚRGICO)
-# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | CERO ASUNTOS VACÍOS
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO CON BUSCADOR PROFUNDO)
+# ENVIADAS (RADICADAS) + RECIBIDAS | 4 HILOS | POOL 14 CLAVES GEMINI
 # ==============================================================================
 
 import os
@@ -52,17 +52,12 @@ lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
 
-# ==============================================================================
-# LIMPIEZA INTELIGENTE DE ASUNTO (BLINDADA CONTRA "SIN ASUNTO")
-# ==============================================================================
 def limpiar_asunto(asunto_raw, texto_doc="", nombre_archivo=""):
-    # Si la IA no trajo asunto o vino vacío, buscar en el texto por patrones comunes
     if not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO"]:
         m_asunto = re.search(r'(?:ASUNTO|OBJETO|REFERENCIA|REF\.?)\s*:\s*(.+?)(?=\n\s*(?:Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
         if m_asunto:
             asunto_raw = " ".join(m_asunto.group(1).split())
         else:
-            # Rescate inteligente desde el nombre del archivo si contiene descripción
             nombre_limpio = os.path.splitext(nombre_archivo)[0]
             m_nom = re.search(r'CON_\d+_(.+)', nombre_limpio, re.IGNORECASE)
             if m_nom:
@@ -213,7 +208,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     rad_rem = ia_rad_rem if is_valid(ia_rad_rem) else ""
     rad_dest = ia_rad_dest if is_valid(ia_rad_dest) else ""
 
-    # Regla 1: Limpiar nombres de archivos que se hayan colado en los radicados
+    # Limpieza de nombres de archivo en radicados
     if rad_dest.lower().endswith(".pdf") or "ci004" in rad_dest.lower() or len(rad_dest) > 25:
         m_gp = re.search(r'GP[-_]?(\d{3,6})', rad_dest, re.IGNORECASE)
         rad_dest = f"GP-{m_gp.group(1)}" if m_gp else ""
@@ -222,7 +217,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
         m_gp = re.search(r'GP[-_]?(\d{3,6})', rad_rem, re.IGNORECASE)
         rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
 
-    # Regla 2: Corregir radicados invertidos de ALMA
+    # Corrección de radicados invertidos de ALMA
     if "ALTO MAGDALENA" in datos["RAZON_SOCIAL_REMITENTE"].upper():
         if "ALMA-" in rad_dest.upper() and not "ALMA-" in rad_rem.upper():
             rad_rem, rad_dest = rad_dest, rad_rem
@@ -233,7 +228,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     elif tipo_flujo == "ENVIADAS" and rad_dest.startswith("GP-") and not rad_rem.startswith("GP-"):
         rad_rem, rad_dest = rad_dest, rad_rem
 
-    # Fallbacks si faltan radicados
     if not is_valid(rad_rem):
         if tipo_flujo == "ENVIADAS":
             m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
@@ -284,16 +278,23 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
 
     return datos
 
-def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
+# BÚSQUEDA PROFUNDA DE CARPETAS (Detecta RADICADAS/2017 y cualquier subcarpeta)
+def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
     archivos_encontrados = []
     if not os.path.exists(ruta_base): return archivos_encontrados
     for root, dirs, files in os.walk(ruta_base):
         pdfs = [f for f in files if f.lower().endswith('.pdf')]
         if not pdfs: continue
+        
+        # Filtro por nombre de carpeta flexible (entra a RADICADAS, 2017, etc.)
+        if carpeta_filtro and carpeta_filtro.lower() != 'todo':
+            if carpeta_filtro.lower() not in root.lower():
+                continue
+                
         m_anio = re.search(r'\b(20\d{2})\b', root)
         anio_detectado = m_anio.group(1) if m_anio else "GENERAL"
-        if procesar_anio and (anio_detectado != procesar_anio and f"/{procesar_anio}" not in root): continue
-        for pdf in pdfs: archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
+        for pdf in pdfs:
+            archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
 def pulir_y_cargar_memoria(ruta_csv):
@@ -307,14 +308,12 @@ def pulir_y_cargar_memoria(ruta_csv):
                     ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
                     nom_arch = os.path.basename(ubic)
 
-                    # Corregir nombres de archivo en radicados
                     for col in ["No. RADICADO REMITENTE", "No. RADICADO DESTINATARIO"]:
                         val = str(df.at[idx, col]).strip()
                         if val.lower().endswith(".pdf") or "ci004" in val.lower() or len(val) > 25:
                             m_gp = re.search(r'GP[-_]?(\d{3,6})', val, re.IGNORECASE)
                             df.at[idx, col] = f"GP-{m_gp.group(1)}" if m_gp else "SIN RADICADO CONSTATADO"
 
-                    # Corregir radicados invertidos ALMA
                     rad_rem_act = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
                     rad_dest_act = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
                     if "ALTO MAGDALENA" in rem.upper():
@@ -328,7 +327,7 @@ def pulir_y_cargar_memoria(ruta_csv):
                             m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
                             if m_gp: df.at[idx, "No. RADICADO DESTINATARIO"] = f"GP-{m_gp.group(1)}"
 
-                # Purgar los que quedaron SIN ASUNTO para re-tabularlos
+                # Purgar fallidos para re-tabularlos
                 filas_fallidas = (
                     df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO", case=False, na=True) |
                     (df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) &
@@ -379,12 +378,13 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (AUTO-REPARACIÓN + PULIDO TOTAL)")
+    print(" MOTOR RESTREPO_2 (ENVIADAS RADICADAS + RECIBIDAS)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
     limite = None
-    procesar_anio = None
+    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
+    etiqueta = f"Carpeta_{carpeta_objetivo}"
 
     if es_prueba in ['si', 's', 'true']:
         try:
@@ -393,19 +393,9 @@ def procesar_archivos():
             limite = 5
         print(f"🎲 MODO PRUEBA: {limite} archivos AL AZAR por flujo.")
         etiqueta = f"PRUEBA_{limite}_archivos"
-    else:
-        resp_alcance = os.environ.get('ALCANCE', 'todo').strip()
-        m_anio_dir = re.search(r'\b(20\d{2})\b', resp_alcance)
-        if m_anio_dir:
-            procesar_anio = m_anio_dir.group(1)
-            print(f"🎯 FILTRADO: Solo año {procesar_anio}.")
-            etiqueta = f"Año_{procesar_anio}"
-        else:
-            print("🚀 MODO PRODUCCIÓN: Procesando TODO.")
-            etiqueta = "Completo"
 
-    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{etiqueta}.csv')
-    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{etiqueta}.xlsx')
+    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
+    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
 
     reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
     if reiniciar:
@@ -420,7 +410,7 @@ def procesar_archivos():
 
     for tipo, ruta_raiz in flujos:
         print(f"\n📂 Buscando en: {tipo}...")
-        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
+        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo)
         
         pendientes = []
         for p, r, a in todos_los_pdfs:
@@ -439,7 +429,7 @@ def procesar_archivos():
             continue
 
         num_trabajadores = 4
-        print(f"🚀 Procesando {len(pendientes)} cartas con {num_trabajadores} hilos...")
+        print(f"🚀 Procesando {len(pendientes)} cartas pendientes con {num_trabajadores} hilos...")
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -456,7 +446,7 @@ def procesar_archivos():
         if not df_final.empty:
             df_final["ÍTEM"] = range(1, len(df_final) + 1)
             df_final.to_excel(ruta_excel, index=False)
-            print(f"\n✅ EXCEL PULIDO Y COMPLETO ({len(df_final)} cartas) EN:\n📁 {ruta_excel}")
+            print(f"\n✅ EXCEL COMPLETO ({len(df_final)} cartas) EN:\n📁 {ruta_excel}")
             enviar_correo_excel(ruta_excel, etiqueta, len(df_final))
 
 def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
@@ -474,8 +464,8 @@ def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
         f'Hola Eduardo,\n\n'
         f'El proceso ha finalizado con éxito para {nombre_bonito}.\n'
         f'Total de cartas consolidadas en este archivo: {total_filas}.\n'
-        f'Se aplicó la corrección para eliminar todos los asuntos sin constatar.\n'
-        f'Se adjunta el Excel definitivo.\n\n'
+        f'Incluye tanto Enviadas (RADICADAS) como Recibidas.\n'
+        f'Se adjunta el Excel final impecable.\n\n'
         f'Saludos!'
     )
 
