@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (FUSIÓN TOTAL + EXCEL CON 2 HOJAS)
-# 4 HILOS PARALELOS | POOL 31 CLAVES GEMINI | DATOS PUROS Y LITERALES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (REPARTO MATEMÁTICO EQUITATIVO DE 31 CLAVES)
+# DISTRIBUCIÓN POR CARTA | ROTACIÓN SIN ATASCOS | EXCEL CON 2 HOJAS
 # ==============================================================================
 
 import os
@@ -40,7 +40,7 @@ for i, k in enumerate(lista_keys, 1):
         print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para probar.", flush=True)
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para trabajar.", flush=True)
 else:
     print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
 
@@ -53,8 +53,6 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
-lock_key = threading.Lock()
-current_key_idx = 0
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -147,8 +145,10 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
-    global current_key_idx, gemini_clients
+# ==============================================================================
+# MOTOR CON REPARTO MATEMÁTICO EQUITATIVO Y REPORTE DE ERRORES REAL
+# ==============================================================================
+def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None
 
@@ -159,13 +159,15 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     modelos_gemini = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
     total_keys = len(gemini_clients)
 
+    # CADA CARTA ARRANCA CON UNA CLAVE DISTINTA: item_num % total_keys
+    start_idx = item_num % total_keys
+
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None
 
-        with lock_key:
-            idx = (current_key_idx + intento) % total_keys
-            nombre_key, client = gemini_clients[idx]
+        idx = (start_idx + intento) % total_keys
+        nombre_key, client = gemini_clients[idx]
 
         for mod in modelos_gemini:
             try:
@@ -175,24 +177,18 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
-                    with lock_key:
-                        current_key_idx = idx
                     return d
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando siguiente...", flush=True)
-                    time.sleep(0.5)
+                    print(f"      ⚠️ {nombre_key} saturada de velocidad (429). Probando siguiente...", flush=True)
                     break
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ⚠️ {nombre_key} no habilitada en este proyecto. Probando siguiente...", flush=True)
+                    print(f"      ⚠️ {nombre_key} rechazada por Google (Límite 0 o no habilitada). Probando siguiente...", flush=True)
                     break
                 else:
+                    print(f"      ⚠️ {nombre_key} ({mod}): {err[:70]}", flush=True)
                     continue
-
-        with lock_key:
-            if current_key_idx == idx:
-                current_key_idx = (current_key_idx + 1) % total_keys
 
     return None
 
@@ -259,7 +255,6 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
     return archivos_encontrados
 
 def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
-    # Buscar todos los archivos CSV de memoria que contengan la carpeta (ej. 2017)
     archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
     
     if not archivos_memoria:
@@ -278,10 +273,9 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     if not dfs:
         return set(), 1
 
-    print(f"🧹 Fusionando {len(dfs)} archivos de memoria existentes...", flush=True)
+    print(f"🧹 Fusionando {len(dfs)} archivos de memoria...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
-    # REGLA EXACTA DE TU FÓRMULA DE EXCEL: Detectar cualquier 'CONSTATADO' o filas vacías
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
@@ -298,7 +292,6 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     print(f"✅ Memorias fusionadas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
     print(f"🎯 Detectadas {malos.sum()} cartas con CONSTATADO que serán reparadas por Gemini.", flush=True)
 
-    # Devolver los nombres limpios de los archivos que ya están buenos
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
     return procesados_basenames, item_sig
@@ -311,7 +304,9 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
-    datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
+    
+    # Se le envía item_num para asignar la clave matemáticamente
+    datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num)
 
     if datos is None:
         print(f"⏸️ [{tipo}] {pdf} | Pausado por falta de cuota.", flush=True)
@@ -343,7 +338,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (FUSIÓN TOTAL + EXCEL CON 2 HOJAS)", flush=True)
+    print(" MOTOR RESTREPO_2 (REPARTO EQUITATIVO DE 31 CLAVES)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
