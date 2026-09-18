@@ -1,6 +1,6 @@
 # ==============================================================================
 # SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO + AUTO-REPARADOR QUIRÚRGICO)
-# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | REPARACIÓN DE FALLIDOS
+# 4 HILOS PARALELOS | POOL 14 CLAVES GEMINI | CERO ASUNTOS VACÍOS
 # ==============================================================================
 
 import os
@@ -22,9 +22,6 @@ import io
 from google import genai
 from google.genai import types
 
-# ==============================================================================
-# POOL DE CLAVES GEMINI
-# ==============================================================================
 print("⏳ [1/3] Cargando Pool de Claves Gemini...")
 
 raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
@@ -55,22 +52,31 @@ lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
 
-# ==========================================
-# LIMPIEZA DE ASUNTO SIN MUTILACIÓN
-# ==========================================
-def limpiar_asunto(asunto_raw, texto_doc=""):
-    if not asunto_raw or str(asunto_raw).strip() in ["None", "N/A", ""]:
-        m = re.search(r'ASUNTO\s*:\s*(.+?)(?=\n\s*(?:Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-        if m: asunto_raw = " ".join(m.group(1).split())
-        else: return "SIN ASUNTO CONSTATADO"
+# ==============================================================================
+# LIMPIEZA INTELIGENTE DE ASUNTO (BLINDADA CONTRA "SIN ASUNTO")
+# ==============================================================================
+def limpiar_asunto(asunto_raw, texto_doc="", nombre_archivo=""):
+    # Si la IA no trajo asunto o vino vacío, buscar en el texto por patrones comunes
+    if not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO"]:
+        m_asunto = re.search(r'(?:ASUNTO|OBJETO|REFERENCIA|REF\.?)\s*:\s*(.+?)(?=\n\s*(?:Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+        if m_asunto:
+            asunto_raw = " ".join(m_asunto.group(1).split())
+        else:
+            # Rescate inteligente desde el nombre del archivo si contiene descripción
+            nombre_limpio = os.path.splitext(nombre_archivo)[0]
+            m_nom = re.search(r'CON_\d+_(.+)', nombre_limpio, re.IGNORECASE)
+            if m_nom:
+                asunto_raw = m_nom.group(1).replace('_', ' ').strip()
+            else:
+                asunto_raw = nombre_limpio.replace('_', ' ').strip()
 
     t = " ".join(str(asunto_raw).strip().split())
-    m_asunto = re.search(r'\bASUNTO\s*:\s*(.+)', t, re.IGNORECASE)
-    if m_asunto: t = m_asunto.group(1).strip()
-    t = re.sub(r'^(?:REFERENCIA|Ref\.?)\s*[:\-\.]*\s*', '', t, flags=re.IGNORECASE).strip()
+    m_as = re.search(r'\b(?:ASUNTO|OBJETO|REFERENCIA|Ref\.?)\s*:\s*(.+)', t, re.IGNORECASE)
+    if m_as: t = m_as.group(1).strip()
+    t = re.sub(r'^(?:REFERENCIA|Ref\.?|OBJETO)\s*[:\-\.]*\s*', '', t, flags=re.IGNORECASE).strip()
     t = re.sub(r'^Contrato\s+de\s+(?:Concesi[oó]n|Interventor[ií]a)[^\n\r–—\.]*?(?:Honda\s*[–—-]\s*Girardot\s*[–—-]\s*Puerto\s*Salgar|Puerto\s*Salgar\s*[–—-]\s*Girardot)?[\.\–—\-\s]*', '', t, flags=re.IGNORECASE).strip()
     t = re.sub(r'^[\.\-\–—:,;\s]+', '', t).strip()
-    return t if t else str(asunto_raw).strip()
+    return t if t else "COMUNICACIÓN GENERAL"
 
 def obtener_insumos_documento(ruta_pdf):
     try:
@@ -130,7 +136,7 @@ REGLAS CRÍTICAS:
 2. "RAZON_SOCIAL_REMITENTE": La entidad que emite y firma la carta o cuyo logo está en el membrete superior.
 3. "NO_RADICADO_REMITENTE": El radicado oficial literal que usó quien envía (ej. ALMA-2016-0003869, o GP-XXXX).
 4. "NO_RADICADO_DESTINATARIO": El radicado o sello colocado por quien recibe (Sticker ANI, código de barras, sello GP).
-5. "ASUNTO": Transcribe literal el asunto del documento.
+5. "ASUNTO": Transcribe literal el asunto, referencia u objeto del documento.
 6. "FECHA": Formato DD/MM/AAAA.
 
 JSON REQUERIDO:
@@ -152,9 +158,6 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-# ==============================================================================
-# CONSULTA A GEMINI (CORREGIDA: YA NO DESCARTA RESPUESTAS VÁLIDAS)
-# ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx
     if not gemini_clients or not img_bytes:
@@ -179,14 +182,14 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
                 )
                 d = parsear_json(r.text)
-                # AHORA ACEPTA LA RESPUESTA SI AL MENOS TRAE ASUNTO O RAZONES SOCIALES
-                if d and isinstance(d, dict) and (d.get("ASUNTO") or d.get("RAZON_SOCIAL_REMITENTE") or d.get("NO_RADICADO_DESTINATARIO")):
+                if d and isinstance(d, dict) and any(d.values()):
                     with lock_key:
                         current_key_idx = (idx + 1) % total_keys
                     return d
             except Exception as e:
                 err = str(e)
                 if "429" in err or "503" in err or "RESOURCE_EXHAUSTED" in err:
+                    time.sleep(1.0)
                     break
                 continue
     return {}
@@ -210,11 +213,27 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     rad_rem = ia_rad_rem if is_valid(ia_rad_rem) else ""
     rad_dest = ia_rad_dest if is_valid(ia_rad_dest) else ""
 
+    # Regla 1: Limpiar nombres de archivos que se hayan colado en los radicados
+    if rad_dest.lower().endswith(".pdf") or "ci004" in rad_dest.lower() or len(rad_dest) > 25:
+        m_gp = re.search(r'GP[-_]?(\d{3,6})', rad_dest, re.IGNORECASE)
+        rad_dest = f"GP-{m_gp.group(1)}" if m_gp else ""
+
+    if rad_rem.lower().endswith(".pdf") or "ci004" in rad_rem.lower() or len(rad_rem) > 25:
+        m_gp = re.search(r'GP[-_]?(\d{3,6})', rad_rem, re.IGNORECASE)
+        rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
+
+    # Regla 2: Corregir radicados invertidos de ALMA
+    if "ALTO MAGDALENA" in datos["RAZON_SOCIAL_REMITENTE"].upper():
+        if "ALMA-" in rad_dest.upper() and not "ALMA-" in rad_rem.upper():
+            rad_rem, rad_dest = rad_dest, rad_rem
+
+    # Detección de cruces de Consorcio 4C
     if tipo_flujo == "RECIBIDAS" and rad_rem.startswith("GP-") and not rad_dest.startswith("GP-"):
         rad_rem, rad_dest = rad_dest, rad_rem
     elif tipo_flujo == "ENVIADAS" and rad_dest.startswith("GP-") and not rad_rem.startswith("GP-"):
         rad_rem, rad_dest = rad_dest, rad_rem
 
+    # Fallbacks si faltan radicados
     if not is_valid(rad_rem):
         if tipo_flujo == "ENVIADAS":
             m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
@@ -254,7 +273,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
 
     datos["NO_RADICADO_REMITENTE"] = rad_rem
     datos["NO_RADICADO_DESTINATARIO"] = rad_dest
-    datos["ASUNTO"] = limpiar_asunto(ia_asunto, texto_completo)
+    datos["ASUNTO"] = limpiar_asunto(ia_asunto, texto_completo, nombre_archivo)
 
     if not is_valid(ia_fecha) or "2105" in ia_fecha or "01/01/" in ia_fecha:
         m_f = re.search(r'(?:Bogot[aá]\s*D\.?C\.?,?\s*|Honda[^\n\r]*,?\s*|Girardot[^\n\r]*,?\s*|Fecha:\s*|FECHA:\s*)(\d{1,2}\s*(?:de|-)\s*[a-zA-Z]+\s*(?:de|-)\s*\d{2,4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
@@ -277,35 +296,55 @@ def buscar_pdfs_en_ruta(ruta_base, procesar_anio=None):
         for pdf in pdfs: archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
-# ==============================================================================
-# MOTOR AUTO-REPARADOR (ELIMINA SOLO LOS REGISTROS FALLIDOS DE LA MEMORIA)
-# ==============================================================================
-def cargar_memoria_con_autoreparacion(ruta_csv):
+def pulir_y_cargar_memoria(ruta_csv):
     if os.path.exists(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                # Detectar filas donde falló la IA ("SIN ASUNTO CONSTATADO")
+                print("🧹 Pulido de registros existentes...")
+                for idx, row in df.iterrows():
+                    rem = str(row.get("RAZON SOCIAL REMITENTE", "")).strip()
+                    ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
+                    nom_arch = os.path.basename(ubic)
+
+                    # Corregir nombres de archivo en radicados
+                    for col in ["No. RADICADO REMITENTE", "No. RADICADO DESTINATARIO"]:
+                        val = str(df.at[idx, col]).strip()
+                        if val.lower().endswith(".pdf") or "ci004" in val.lower() or len(val) > 25:
+                            m_gp = re.search(r'GP[-_]?(\d{3,6})', val, re.IGNORECASE)
+                            df.at[idx, col] = f"GP-{m_gp.group(1)}" if m_gp else "SIN RADICADO CONSTATADO"
+
+                    # Corregir radicados invertidos ALMA
+                    rad_rem_act = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
+                    rad_dest_act = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
+                    if "ALTO MAGDALENA" in rem.upper():
+                        if "ALMA-" in rad_dest_act.upper() and not "ALMA-" in rad_rem_act.upper():
+                            df.at[idx, "No. RADICADO REMITENTE"] = rad_dest_act
+                            df.at[idx, "No. RADICADO DESTINATARIO"] = rad_rem_act
+
+                    if "recibidas" in ubic.lower():
+                        rad_dest_act = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
+                        if not rad_dest_act.startswith("GP-") and ("SIN RADICADO" in rad_dest_act.upper() or rad_dest_act == ""):
+                            m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
+                            if m_gp: df.at[idx, "No. RADICADO DESTINATARIO"] = f"GP-{m_gp.group(1)}"
+
+                # Purgar los que quedaron SIN ASUNTO para re-tabularlos
                 filas_fallidas = (
                     df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO", case=False, na=True) |
                     (df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) &
                      df["RAZON SOCIAL DESTINATARIO"].astype(str).str.contains("SIN DESTINATARIO", case=False, na=True))
                 )
-                
                 num_fallidos = filas_fallidas.sum()
                 if num_fallidos > 0:
-                    print(f"\n🔧 REPARADOR QUIRÚRGICO: Se detectaron {num_fallidos} cartas fallidas.")
-                    print(f"   Conservando {len(df) - num_fallidos} cartas que ya están perfectas.")
-                    print(f"   Liberando las {num_fallidos} cartas fallidas para que Gemini las procese de nuevo...")
-                    df_bueno = df[~filas_fallidas].copy()
-                    df_bueno.to_csv(ruta_csv, index=False)
-                    df = df_bueno
+                    print(f"🔧 Se detectaron {num_fallidos} cartas fallidas. Se reprocesarán con Gemini...")
+                    df = df[~filas_fallidas].copy()
 
+                df.to_csv(ruta_csv, index=False)
                 procesados = set(df["UBICACION_ARCHIVO"].dropna().astype(str).str.strip())
                 item_sig = int(df["ÍTEM"].max()) + 1 if "ÍTEM" in df.columns and not df.empty else 1
                 return procesados, item_sig
         except Exception as e:
-            print(f"⚠️ Aviso al leer memoria existente: {e}")
+            print(f"⚠️ Aviso al leer memoria: {e}")
     return set(), 1
 
 def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
@@ -340,7 +379,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (AUTO-REPARACIÓN INCREMENTAL)")
+    print(" MOTOR RESTREPO_2 (AUTO-REPARACIÓN + PULIDO TOTAL)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -376,17 +415,13 @@ def procesar_archivos():
         if os.path.exists(ruta_excel):
             os.remove(ruta_excel)
 
-    # 1. Cargar memoria limpiando solo las 589 filas fallidas
-    procesados, item_counter = cargar_memoria_con_autoreparacion(ruta_memoria)
-
+    procesados, item_counter = pulir_y_cargar_memoria(ruta_memoria)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("ENVIADAS", RUTA_ENVIADAS)]
-    total_pendientes_global = 0
 
     for tipo, ruta_raiz in flujos:
         print(f"\n📂 Buscando en: {tipo}...")
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, procesar_anio)
         
-        # Filtra omitiendo los 2.383 que ya están listos
         pendientes = []
         for p, r, a in todos_los_pdfs:
             rel_path = os.path.relpath(r, RUTA_BASE).strip()
@@ -399,14 +434,12 @@ def procesar_archivos():
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
 
-        total_pendientes_global += len(pendientes)
-
         if not pendientes:
             print("   ✅ Todas las cartas de este flujo ya están perfectamente tabuladas.")
             continue
 
         num_trabajadores = 4
-        print(f"🚀 Procesando {len(pendientes)} cartas pendientes con {num_trabajadores} hilos...")
+        print(f"🚀 Procesando {len(pendientes)} cartas con {num_trabajadores} hilos...")
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -418,19 +451,14 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
-    # Compilar Excel consolidado
     if os.path.exists(ruta_memoria):
         df_final = pd.read_csv(ruta_memoria)
         if not df_final.empty:
-            # Reenumerar ítems del 1 al total limpiamente
             df_final["ÍTEM"] = range(1, len(df_final) + 1)
             df_final.to_excel(ruta_excel, index=False)
-            print(f"\n✅ EXCEL REPARADO Y COMPLETO ({len(df_final)} cartas) EN:\n📁 {ruta_excel}")
+            print(f"\n✅ EXCEL PULIDO Y COMPLETO ({len(df_final)} cartas) EN:\n📁 {ruta_excel}")
             enviar_correo_excel(ruta_excel, etiqueta, len(df_final))
 
-# ==============================================================================
-# ENVÍO AUTOMÁTICO DE CORREO
-# ==============================================================================
 def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         print("⚠️ No se configuraron credenciales de correo. Omitiendo envío.")
@@ -446,7 +474,8 @@ def enviar_correo_excel(ruta_archivo, etiqueta, total_filas):
         f'Hola Eduardo,\n\n'
         f'El proceso ha finalizado con éxito para {nombre_bonito}.\n'
         f'Total de cartas consolidadas en este archivo: {total_filas}.\n'
-        f'Se adjunta el Excel final con todos los registros reparados.\n\n'
+        f'Se aplicó la corrección para eliminar todos los asuntos sin constatar.\n'
+        f'Se adjunta el Excel definitivo.\n\n'
         f'Saludos!'
     )
 
