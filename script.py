@@ -1,7 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MODELOS OFICIALES GEMINI 3.X | 0 RELLENOS)
-# ENDPOINTS: 3.8-FLASH -> 3.7-FLASH -> 3.6-FLASH -> 3.5-FLASH -> 3.1-FLASH-LITE
-# POOL 31 CLAVES | EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MÁXIMO RENDIMIENTO)
+# 8 HILOS EN PARALELO | PRIORIDAD FLASH-LITE (2s) | LISTA NEGRA AUTOMÁTICA
 # ==============================================================================
 
 import os
@@ -41,7 +40,7 @@ for i, k in enumerate(lista_keys, 1):
         print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para trabajar.", flush=True)
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para trabajar a toda marcha.", flush=True)
 else:
     print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
 
@@ -54,6 +53,8 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
+lock_blacklist = threading.Lock()
+claves_desactivadas = set()  # Lista negra para no volver a tocar claves sin permisos
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -117,7 +118,7 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
 PROMPT_AUDITORIA = """
 Eres un auditor archivístico experto.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento.
-PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO", "SIN REMITENTE", "SIN DESTINATARIO". Si algo no existe, déjalo vacío "".
+PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Quién emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "AGENCIA NACIONAL DE INFRAESTRUCTURA"). Mira logos o membrete superior.
@@ -147,34 +148,38 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# MODELOS OFICIALES ACTIVOS EN TU GOOGLE AI STUDIO (GEMINI 3.X)
+# PRIORIDAD TURBO: MODELOS LITE DE 2 SEGUNDOS PRIMERO
 # ==============================================================================
 MODELOS_GEMINI_OFICIALES = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite"
+    "gemini-3.5-flash-lite",  # ⚡ 1. Ultra rápido (2 a 3 segundos por documento)
+    "gemini-3.1-flash-lite",  # ⚡ 2. Ultra veloz de respaldo
+    "gemini-3.5-flash",       # 3. Respaldo balanceado
+    "gemini-3.7-flash",       # 4. Respaldo inteligente
+    "gemini-3.8-flash"        # 5. Último recurso (pesado)
 ]
 
-def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num):
+def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
-        return None
+        return None, "", ""
 
     apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
     part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
     total_keys = len(gemini_clients)
-    start_idx = item_num % total_keys
+    start_idx = (item_num + hilo_id) % total_keys
 
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
-            return None
+            return None, "", ""
 
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
+
+        # Si ya descubrimos que esta clave no tiene permisos, se salta en 0 segundos
+        with lock_blacklist:
+            if nombre_key in claves_desactivadas:
+                continue
 
         for mod in MODELOS_GEMINI_OFICIALES:
             try:
@@ -184,19 +189,22 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
-                    return d
+                    return d, nombre_key, mod
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} saturada de cuota (429). Probando siguiente...", flush=True)
+                if any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    with lock_blacklist:
+                        if nombre_key not in claves_desactivadas:
+                            claves_desactivadas.add(nombre_key)
+                            print(f"      ❌ {nombre_key} descartada permanentemente (Sin permisos).", flush=True)
                     break
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ⚠️ {nombre_key} no autorizada en este proyecto. Probando siguiente...", flush=True)
+                elif any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                    time.sleep(0.3)
                     break
                 else:
                     continue
 
-    return None
+    return None, "", ""
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
@@ -274,12 +282,12 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
             if not d.empty and "UBICACION_ARCHIVO" in d.columns:
                 dfs.append(d)
         except Exception as e:
-            print(f"⚠️ Aviso leyendo {f_mem}: {e}", flush=True)
+            pass
 
     if not dfs:
         return set(), 1
 
-    print(f"🧹 Fusionando {len(dfs)} archivos de memoria...", flush=True)
+    print(f"🧹 Fusionando {len(dfs)} memorias...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
     tiene_constatado = df.astype(str).apply(
@@ -296,13 +304,13 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
     print(f"✅ Memorias fusionadas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas con CONSTATADO que serán reparadas por Gemini.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas con CONSTATADO a reparar.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
     return procesados_basenames, item_sig
 
-def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
+def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id):
     if evento_cuota_agotada.is_set():
         return False
 
@@ -310,10 +318,10 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
-    datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num)
+    datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
     if datos is None:
-        print(f"⏸️ [{tipo}] {pdf} | Pausado por falta de cuota.", flush=True)
+        print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por falta de cuota.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -334,12 +342,15 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    print(f"📄 [{tipo}] {pdf} | ⏱️ {duracion}s", flush=True)
+    print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# PROCESO PRINCIPAL (8 HILOS CONCURRENTES)
+# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (MODELOS OFICIALES GEMINI 3.X)", flush=True)
+    print(" MOTOR RESTREPO_2 (TURBO MÁXIMO RENDIMIENTO: 8 HILOS + FLASH-LITE)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -392,15 +403,17 @@ def procesar_archivos():
             print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
             continue
 
-        num_trabajadores = 4
-        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} hilos...", flush=True)
+        # ⚡ 8 TRABAJADORES EN PARALELO
+        num_trabajadores = 8
+        print(f"🚀 Procesando {len(pendientes)} cartas con {num_trabajadores} HILOS SIMULTÁNEOS...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
-            for pdf, ruta_completa, anio_doc in pendientes:
+            for i, (pdf, ruta_completa, anio_doc) in enumerate(pendientes):
                 if evento_cuota_agotada.is_set():
                     break
-                f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria)
+                hilo_id = (i % num_trabajadores) + 1
+                f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
                 futuros.append(f)
                 item_counter += 1
 
