@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Dual (Recibidas + Radicadas)
+      - name: Descarga Quirúrgica Estricta (SOLO archivos con CONSTATADO o pendientes)
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -79,42 +79,53 @@ jobs:
           carpeta = '${{ inputs.carpeta_objetivo }}'
           es_prueba = '${{ inputs.es_prueba }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
-          archivo_memoria = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
-          buenos_env = set()
-          buenos_rec = set()
+          # Búsqueda universal del archivo de memoria (encuentra con o sin 'Año_')
+          posibles_archivos = [
+              f'RESTREPO_2_IA_memoria_Año_{carpeta}.csv',
+              f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+          ]
+          archivo_memoria = next((f for f in posibles_archivos if os.path.exists(f)), posibles_archivos[0])
+
+          buenos_filenames = set()
 
           if os.path.exists(archivo_memoria) and not reiniciar and es_prueba != 'si':
               try:
                   df = pd.read_csv(archivo_memoria)
                   if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
-                      malos = (
-                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO|CI004', case=False, na=True) |
-                          df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) |
-                          df['RAZON SOCIAL DESTINATARIO'].astype(str).str.contains('SIN DESTINATARIO', case=False, na=True) |
-                          (df['ASUNTO / TIPO DOCUMENTAL'].fillna('').str.strip() == '')
+                      # REGLA EXACTA DE TU FÓRMULA DE EXCEL: Buscar 'CONSTATADO' en cualquier columna
+                      tiene_constatado = df.astype(str).apply(
+                          lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
+                      ).any(axis=1)
+
+                      asunto_invalido = (
+                          df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
+                          df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('CI004_', case=False, na=False)
                       )
+
+                      malos = tiene_constatado | asunto_invalido
                       df_bueno = df[~malos]
                       df_bueno.to_csv(archivo_memoria, index=False)
-                      print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas incompletas para re-tabular.')
 
+                      print(f'📄 Archivo de memoria procesado: {archivo_memoria}')
+                      print(f'✅ Conservando {len(df_bueno)} cartas que NO tienen CONSTATADO.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas con CONSTATADO para descargar y reparar.')
+
+                      # Extraer únicamente el nombre limpio del archivo (basename)
                       for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
-                          r = str(ruta).strip().replace('\\\\', '/')
-                          if '15_01_Cartas_Enviadas/' in r:
-                              buenos_env.add(r.split('15_01_Cartas_Enviadas/')[-1].strip())
-                          elif '15_04_Comunic_Recibidas/' in r:
-                              buenos_rec.add(r.split('15_04_Comunic_Recibidas/')[-1].strip())
+                          buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
               except Exception as e:
-                  print(f'Aviso memoria: {e}')
+                  print(f'Aviso procesando memoria: {e}')
 
+          # Leer los que existen en Drive
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
               todos_rec = [line.strip() for line in f if line.strip()]
 
-          descargar_env = [x for x in todos_env if x not in buenos_env]
-          descargar_rec = [x for x in todos_rec if x not in buenos_rec]
+          # CRUCE POR NOMBRE EXACTO DE ARCHIVO (INFALIBLE)
+          descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos_filenames]
+          descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos_filenames]
 
           if es_prueba == 'si':
               import random
@@ -122,9 +133,10 @@ jobs:
               descargar_env = random.sample(descargar_env, min(len(descargar_env), limite))
               descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
 
-          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
-          print(f'   - Radicadas/Enviadas pendientes: {len(descargar_env)}')
-          print(f'   - Recibidas pendientes: {len(descargar_rec)}')
+          print(f'\n🚀 DESCARGA QUIRÚRGICA REAL:')
+          print(f'   - Enviadas/Radicadas a descargar: {len(descargar_env)}')
+          print(f'   - Recibidas a descargar: {len(descargar_rec)}')
+          print(f'   (Las cartas buenas ya tabuladas NO se descargarán)')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
