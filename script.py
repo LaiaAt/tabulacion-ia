@@ -1,6 +1,7 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO MÁXIMO RENDIMIENTO)
-# 8 HILOS EN PARALELO | PRIORIDAD FLASH-LITE (2s) | LISTA NEGRA AUTOMÁTICA
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO 8 HILOS | CERO EXPULSIONES)
+# TODAS LAS CLAVES SE MANTIENEN VIVAS | ROTACIÓN PURA | FLASH-LITE (2s)
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% REALES
 # ==============================================================================
 
 import os
@@ -53,8 +54,6 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
-lock_blacklist = threading.Lock()
-claves_desactivadas = set()  # Lista negra para no volver a tocar claves sin permisos
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -118,7 +117,7 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
 PROMPT_AUDITORIA = """
 Eres un auditor archivístico experto.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento.
-PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
+PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO", "SIN REMITENTE", "SIN DESTINATARIO". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Quién emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "AGENCIA NACIONAL DE INFRAESTRUCTURA"). Mira logos o membrete superior.
@@ -147,17 +146,16 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-# ==============================================================================
-# PRIORIDAD TURBO: MODELOS LITE DE 2 SEGUNDOS PRIMERO
-# ==============================================================================
 MODELOS_GEMINI_OFICIALES = [
-    "gemini-3.5-flash-lite",  # ⚡ 1. Ultra rápido (2 a 3 segundos por documento)
-    "gemini-3.1-flash-lite",  # ⚡ 2. Ultra veloz de respaldo
+    "gemini-3.5-flash-lite",  # ⚡ 1. Ultra rápido (1.5 a 2.5s)
+    "gemini-3.1-flash-lite",  # ⚡ 2. Respaldo ultra veloz
     "gemini-3.5-flash",       # 3. Respaldo balanceado
-    "gemini-3.7-flash",       # 4. Respaldo inteligente
-    "gemini-3.8-flash"        # 5. Último recurso (pesado)
+    "gemini-3.7-flash"        # 4. Respaldo inteligente
 ]
 
+# ==============================================================================
+# MOTOR CON ROTACIÓN CONTINUA (CERO EXPULSIONES | TODAS LAS CLAVES SE MANTIENEN)
+# ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None, "", ""
@@ -169,17 +167,13 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     total_keys = len(gemini_clients)
     start_idx = (item_num + hilo_id) % total_keys
 
+    # Prueba cada una de las 31 claves sin expulsar ninguna
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None, "", ""
 
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
-
-        # Si ya descubrimos que esta clave no tiene permisos, se salta en 0 segundos
-        with lock_blacklist:
-            if nombre_key in claves_desactivadas:
-                continue
 
         for mod in MODELOS_GEMINI_OFICIALES:
             try:
@@ -192,15 +186,10 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                     return d, nombre_key, mod
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    with lock_blacklist:
-                        if nombre_key not in claves_desactivadas:
-                            claves_desactivadas.add(nombre_key)
-                            print(f"      ❌ {nombre_key} descartada permanentemente (Sin permisos).", flush=True)
-                    break
-                elif any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                # Si la clave está ocupada o da error temporal, salta inmediatamente a la siguiente
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "PERMISSION_DENIED", "403", "401"]):
                     time.sleep(0.3)
-                    break
+                    break  # Salta a la siguiente clave del pool sin expulsarla
                 else:
                     continue
 
@@ -321,7 +310,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
     if datos is None:
-        print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por falta de cuota.", flush=True)
+        print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por cuota temporal.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -345,12 +334,9 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
-# ==============================================================================
-# PROCESO PRINCIPAL (8 HILOS CONCURRENTES)
-# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (TURBO MÁXIMO RENDIMIENTO: 8 HILOS + FLASH-LITE)", flush=True)
+    print(" MOTOR RESTREPO_2 (8 HILOS EN PARALELO | CERO EXPULSIONES)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -403,9 +389,8 @@ def procesar_archivos():
             print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
             continue
 
-        # ⚡ 8 TRABAJADORES EN PARALELO
         num_trabajadores = 8
-        print(f"🚀 Procesando {len(pendientes)} cartas con {num_trabajadores} HILOS SIMULTÁNEOS...", flush=True)
+        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} HILOS SIMULTÁNEOS...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -465,7 +450,6 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
         f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
         f'Se ha alcanzado el límite de cuota en las claves válidas de Gemini.\n\n'
         f'El sistema se frenó para NO inventar datos ni generar celdas vacías.\n'
-        f'Agrega más claves en GitHub Secrets para continuar.\n\n'
         f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
         f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
         f'Saludos!'
