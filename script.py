@@ -1,7 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO CON FRENO DE EMERGENCIA POR CUOTA)
-# POOL 14 CLAVES GEMINI | ROTACIÓN 429 | ALERTA AL DUEÑO SI SE ACABA LA CUOTA
-# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% PUROS Y LITERALES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (ROTACIÓN OBLIGATORIA + AUTO-EXPULSIÓN)
+# 4 HILOS PARALELOS | AUTO-PURGA DE CLAVES RECHAZADAS | CERO ATASCOS
 # ==============================================================================
 
 import os
@@ -53,8 +52,6 @@ RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 lock_csv = threading.Lock()
 lock_key = threading.Lock()
 current_key_idx = 0
-
-# Bandera de freno de emergencia si todas las APIs se quedan sin cuota
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -148,10 +145,10 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# MOTOR CON ROTACIÓN Y DETECCIÓN DE AGOTAMIENTO TOTAL DE CUOTA
+# MOTOR CON ROTACIÓN OBLIGATORIA Y AUTO-PURGA DE CLAVES INVÁLIDAS
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
-    global current_key_idx
+    global current_key_idx, gemini_clients
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None
 
@@ -160,19 +157,28 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
     modelos_gemini = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
-    total_keys = len(gemini_clients)
 
-    claves_sin_cuota_consecutivas = 0
+    with lock_key:
+        total_keys = len(gemini_clients)
 
-    for intento_key in range(total_keys):
+    if total_keys == 0:
+        evento_cuota_agotada.set()
+        return None
+
+    for _ in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None
 
         with lock_key:
-            idx = (current_key_idx + intento_key) % total_keys
+            if not gemini_clients:
+                evento_cuota_agotada.set()
+                return None
+            current_key_idx = current_key_idx % len(gemini_clients)
+            idx = current_key_idx
             nombre_key, client = gemini_clients[idx]
+            # AVANCE OBLIGATORIO: El próximo hilo tomará la siguiente clave de inmediato
+            current_key_idx = (current_key_idx + 1) % len(gemini_clients)
 
-        clave_agotada = False
         for mod in modelos_gemini:
             try:
                 r = client.models.generate_content(
@@ -181,26 +187,21 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
-                    with lock_key:
-                        current_key_idx = (idx + 1) % total_keys
                     return d
             except Exception as e:
                 err = str(e).upper()
-                # Detección de agotamiento de cuota o rate limit
+                # 1. Si la clave es rechazada o inválida (ej. las claves AQ.), expulsarla del pool
+                if any(k in err for k in ["API_KEY_INVALID", "API KEY NOT VALID", "PERMISSION_DENIED", "401", "403"]):
+                    print(f"      ❌ {nombre_key} expulsada del pool (Clave rechazada/inválida por Google).")
+                    with lock_key:
+                        gemini_clients = [c for c in gemini_clients if c[0] != nombre_key]
+                    break
+                # 2. Si es 429 de velocidad, pasar a la siguiente clave
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "LIMIT_EXCEEDED"]):
-                    clave_agotada = True
+                    print(f"      ⚠️ {nombre_key} saturada (429). Rotando a la siguiente clave...")
+                    time.sleep(0.5)
                     break
                 continue
-
-        if clave_agotada:
-            claves_sin_cuota_consecutivas += 1
-            print(f"      ⚠️ {nombre_key} sin cuota (429). Rotando de inmediato a la siguiente...")
-
-    # Si probó TODAS las claves y ninguna tenía cuota:
-    if claves_sin_cuota_consecutivas >= total_keys:
-        print("\n🚨🚨🚨 ALERTA CRÍTICA: TODAS LAS CLAVES DE GEMINI AGOTARON SU CUOTA 🚨🚨🚨")
-        evento_cuota_agotada.set()
-        return None
 
     return None
 
@@ -276,7 +277,7 @@ def pulir_y_cargar_memoria(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                print("🧹 Purgando registros defectuosos para asegurar datos 100% reales...")
+                print("🧹 Purgando registros defectuosos...")
                 malos = (
                     df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO|CI004", case=False, na=True) |
                     df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) |
@@ -302,7 +303,6 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
 
-    # Si la IA falló por falta de cuota, NO guardamos datos vacíos ni inventados
     if datos is None:
         print(f"⏸️ [{tipo}] {pdf} | Pausado por cuota (no se inventan datos).")
         return False
@@ -328,12 +328,9 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     print(f"📄 [{tipo}] {pdf} | ⏱️ {duracion}s")
     return True
 
-# ==============================================================================
-# PROCESO PRINCIPAL CON FRENO DE EMERGENCIA
-# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (FRENO DE EMERGENCIA + EXCEL 2 HOJAS)")
+    print(" MOTOR RESTREPO_2 (ROTACIÓN OBLIGATORIA + EXCEL 2 HOJAS)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -401,23 +398,17 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
-    # ==========================================================================
-    # VERIFICACIÓN: ¿SE AGOTÓ LA CUOTA O TERMINÓ EXITOSAMENTE?
-    # ==========================================================================
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
         print("\n📧 Enviando correo de ALERTA al dueño del programa...")
         enviar_correo_alerta_cuota(ruta_excel, etiqueta)
-        print("🛑 Programa detenido de forma segura para no inventar datos.")
+        print("🛑 Programa detenido de forma segura.")
         sys.exit(0)
     else:
         print("\n📧 Enviando correo de ÉXITO al dueño del programa...")
         enviar_correo_exito(ruta_excel, etiqueta)
 
-# ==============================================================================
-# GENERACIÓN DE EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
-# ==============================================================================
 def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
     if os.path.exists(ruta_memoria):
         df_final = pd.read_csv(ruta_memoria)
@@ -439,9 +430,6 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
             print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas reales")
             print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas reales")
 
-# ==============================================================================
-# ENVÍO DE CORREO DE ALERTA (CUANDO SE ACABAN TODAS LAS APIS)
-# ==============================================================================
 def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         return
@@ -453,52 +441,11 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     msg.set_content(
         f'Hola Eduardo,\n\n'
         f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
-        f'Se ha alcanzado el límite de cuota (Error 429) en las 14 claves de Gemini configuradas.\n\n'
-        f'PROTECCIÓN DE DATOS:\n'
-        f'El sistema se frenó para NO inventar datos, NO generar celdas vacías y NO escribir textos de relleno.\n\n'
-        f'¿QUÉ DEBES HACER?\n'
-        f'1. Crea más claves API en Google AI Studio (o espera a que Google renueve la cuota gratuita a la medianoche).\n'
-        f'2. Agrega las claves nuevas en GitHub Secrets en GEMINI_API_KEYS.\n'
-        f'3. Vuelve a ejecutar el flujo en GitHub Actions.\n\n'
-        f'TU AVANCE ESTÁ A SALVO: El sistema guardó exactamente las cartas que alcanzó a procesar de forma perfecta. '
-        f'Cuando vuelvas a ejecutarlo, continuará exactamente donde se quedó.\n\n'
-        f'Adjunto encontrarás el Excel con el avance consolidado en sus dos hojas (Recibidas y Radicadas).\n\n'
-        f'Saludos,\n'
-        f'Tu Bot Auditor'
-    )
-
-    try:
-        if os.path.exists(ruta_archivo):
-            with open(ruta_archivo, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(ruta_archivo)
-            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print("📧 ¡CORREO DE ALERTA ENVIADO EXITOSAMENTE A TU GMAIL!")
-    except Exception as e:
-        print(f"❌ Error al enviar correo de alerta: {e}")
-
-# ==============================================================================
-# ENVÍO DE CORREO DE ÉXITO FINAL
-# ==============================================================================
-def enviar_correo_exito(ruta_archivo, etiqueta):
-    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        return
-
-    msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
-        f'El archivo adjunto contiene las 2 hojas completas y ordenadas:\n'
-        f' - Hoja "Recibidas"\n'
-        f' - Hoja "Radicadas"\n\n'
-        f'Todos los datos son 100% reales, literales y fieles a los documentos.\n\n'
+        f'Se ha alcanzado el límite de cuota (Error 429) en las claves válidas de Gemini.\n\n'
+        f'El sistema se frenó para NO inventar datos ni generar celdas vacías.\n'
+        f'Agrega más claves en GitHub Secrets para continuar.\n\n'
+        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
+        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
         f'Saludos!'
     )
 
@@ -512,7 +459,39 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("🚀 ¡CORREO DE ÉXITO ENVIADO A TU GMAIL!")
+        print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!")
+    except Exception as e:
+        print(f"❌ Error al enviar correo de alerta: {e}")
+
+def enviar_correo_exito(ruta_archivo, etiqueta):
+    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
+    msg['From'] = EMAIL_REMITENTE
+    msg['To'] = EMAIL_DESTINO
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
+        f'El archivo adjunto contiene las 2 hojas completas:\n'
+        f' - Hoja "Recibidas"\n'
+        f' - Hoja "Radicadas"\n\n'
+        f'Datos 100% puros y reales.\n\n'
+        f'Saludos!'
+    )
+
+    try:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print("🚀 ¡CORREO ENVIADO CON ÉXITO A TU GMAIL!")
     except Exception as e:
         print(f"❌ Error al enviar correo de éxito: {e}")
 
