@@ -88,7 +88,6 @@ jobs:
               try:
                   df = pd.read_csv(archivo_memoria)
                   if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
-                      # Limpiar filas con textos de relleno anteriores
                       malos = (
                           df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO|CI004', case=False, na=True) |
                           df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) |
@@ -98,7 +97,7 @@ jobs:
                       df_bueno = df[~malos]
                       df_bueno.to_csv(archivo_memoria, index=False)
                       print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas con datos incompletos para re-tabular.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas incompletas para re-tabular.')
 
                       for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                           r = str(ruta).strip().replace('\\\\', '/')
