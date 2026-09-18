@@ -19,7 +19,7 @@ on:
         required: true
         default: '2017'
       reiniciar_memoria:
-        description: '¿FORZAR reinicio desde cero borrando avance previo? (si/no)'
+        description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
         options:
           - 'no'
@@ -60,18 +60,19 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Profunda (Enviadas + Recibidas)
+      - name: Descarga Quirúrgica Dual (Recibidas + Radicadas)
         run: |
-          # Filtro con comodín doble '**/' para buscar en cualquier nivel de subcarpeta (ej. RADICADAS/2017)
-          if [ "${{ inputs.carpeta_objetivo }}" = "todo" ]; then
-            FILTRO="**.[pP][dD][fF]"
-          else
-            FILTRO="**/*${{ inputs.carpeta_objetivo }}*/**.[pP][dD][fF]"
-          fi
+          CARPETA="${{ inputs.carpeta_objetivo }}"
+          echo "Consultando archivos en Drive para: $CARPETA"
 
-          echo "Consultando archivos en Drive con filtro profundo: $FILTRO"
-          rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_enviadas.txt
-          rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "$FILTRO" --files-only -R > drive_recibidas.txt
+          # Filtro dual: captura tanto la raíz como subcarpetas profundas (RADICADAS)
+          if [ "$CARPETA" = "todo" ]; then
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+          else
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+          fi
 
           python -c "
           import os, pandas as pd
@@ -88,16 +89,16 @@ jobs:
               try:
                   df = pd.read_csv(archivo_memoria)
                   if not df.empty and 'UBICACION_ARCHIVO' in df.columns:
-                      # Limpiar solo los registros con error
+                      # Limpiar filas con textos de relleno anteriores
                       malos = (
                           df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('SIN ASUNTO', case=False, na=True) |
-                          (df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) &
-                           df['RAZON SOCIAL DESTINATARIO'].astype(str).str.contains('SIN DESTINATARIO', case=False, na=True))
+                          df['RAZON SOCIAL REMITENTE'].astype(str).str.contains('SIN REMITENTE', case=False, na=True) |
+                          (df['ASUNTO / TIPO DOCUMENTAL'].fillna('').str.strip() == '')
                       )
                       df_bueno = df[~malos]
                       df_bueno.to_csv(archivo_memoria, index=False)
-                      print(f'✅ Memoria limpia: {len(df_bueno)} cartas buenas conservadas.')
-                      print(f'🎯 Detectadas {malos.sum()} cartas con error para re-descargar.')
+                      print(f'✅ Conservando {len(df_bueno)} cartas perfectamente tabuladas.')
+                      print(f'🎯 Detectadas {malos.sum()} cartas defectuosas para re-tabular con la IA.')
 
                       for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                           r = str(ruta).strip().replace('\\\\', '/')
@@ -109,16 +110,22 @@ jobs:
                   print(f'Aviso memoria: {e}')
 
           with open('drive_enviadas.txt') as f:
-              drive_env = [line.strip() for line in f if line.strip()]
+              todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
-              drive_rec = [line.strip() for line in f if line.strip()]
+              todos_rec = [line.strip() for line in f if line.strip()]
 
-          descargar_env = [x for x in drive_env if x not in buenos_env]
-          descargar_rec = [x for x in drive_rec if x not in buenos_rec]
+          descargar_env = [x for x in todos_env if x not in buenos_env]
+          descargar_rec = [x for x in todos_rec if x not in buenos_rec]
 
-          print(f'\n🚀 DESCARGA DETECTADA:')
-          print(f'   - Enviadas a descargar (incluye RADICADAS): {len(descargar_env)}')
-          print(f'   - Recibidas a descargar (reparaciones): {len(descargar_rec)}')
+          if es_prueba == 'si':
+              import random
+              limite = int('${{ inputs.limite_prueba }}' or '5')
+              descargar_env = random.sample(descargar_env, min(len(descargar_env), limite))
+              descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
+
+          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
+          print(f'   - Enviadas/Radicadas pendientes: {len(descargar_env)}')
+          print(f'   - Recibidas pendientes: {len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
@@ -126,7 +133,6 @@ jobs:
               f.write('\n'.join(descargar_rec))
           "
 
-          # Descarga solo los pendientes de Enviadas (entra a RADICADAS) y Recibidas
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
@@ -148,5 +154,5 @@ jobs:
           git config --global user.email "bot@github.com"
           git pull --rebase origin main || true
           git add RESTREPO_2_IA_memoria_*.csv || true
-          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios nuevos"
+          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
           git push origin main || true
