@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (ROTACIÓN PERSISTENTE | CERO EXPULSIONES)
-# PRUEBA TODAS LAS CLAVES | SI FUNCIONA LA MANTIENE | EXCEL 2 HOJAS
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CON ORDEN DE ARRANQUE GARANTIZADA)
+# POOL 31 CLAVES GEMINI | 4 HILOS | EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
 # ==============================================================================
 
 import os
@@ -17,13 +17,17 @@ from email.message import EmailMessage
 import pandas as pd
 import requests
 
+# Forzar a Python a mostrar los mensajes en pantalla en vivo sin retrasos
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
+
 import pymupdf as fitz
 from PIL import Image
 import io
 from google import genai
 from google.genai import types
 
-print("⏳ [1/3] Cargando Pool de Claves Gemini...")
+print("⏳ [1/3] Cargando Pool de Claves Gemini...", flush=True)
 
 raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
 lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
@@ -34,12 +38,12 @@ for i, k in enumerate(lista_keys, 1):
         c = genai.Client(api_key=k)
         gemini_clients.append((f"Key-{i}", c))
     except Exception as e:
-        print(f"⚠️ Error cargando clave Gemini #{i}: {e}")
+        print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para probar.")
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para probar.", flush=True)
 else:
-    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.")
+    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -144,9 +148,6 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-# ==============================================================================
-# MOTOR CON ROTACIÓN CONTINUA (SI FUNCIONA LA MANTIENE, SI FALLA PASA A OTRA)
-# ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx, gemini_clients
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
@@ -175,23 +176,21 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
-                    # ¡Éxito! Mantenemos esta clave activa para el siguiente documento
                     with lock_key:
                         current_key_idx = idx
                     return d
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando la siguiente clave...")
+                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando la siguiente clave...", flush=True)
                     time.sleep(0.5)
                     break
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ⚠️ {nombre_key} no habilitada en este proyecto. Probando siguiente...")
+                    print(f"      ⚠️ {nombre_key} no habilitada en este proyecto. Probando siguiente...", flush=True)
                     break
                 else:
                     continue
 
-        # Si esta clave falló, avanzamos el índice para probar la siguiente
         with lock_key:
             if current_key_idx == idx:
                 current_key_idx = (current_key_idx + 1) % total_keys
@@ -265,7 +264,7 @@ def pulir_y_cargar_memoria(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                print("🧹 Purgando registros con textos de relleno...")
+                print("🧹 Purgando registros defectuosos...", flush=True)
                 malos = (
                     df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO|CI004", case=False, na=True) |
                     df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) |
@@ -278,7 +277,7 @@ def pulir_y_cargar_memoria(ruta_csv):
                 item_sig = len(df_limpio) + 1
                 return procesados, item_sig
         except Exception as e:
-            print(f"⚠️ Aviso memoria: {e}")
+            print(f"⚠️ Aviso memoria: {e}", flush=True)
     return set(), 1
 
 def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
@@ -292,7 +291,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
 
     if datos is None:
-        print(f"⏸️ [{tipo}] {pdf} | Pausado por falta de cuota.")
+        print(f"⏸️ [{tipo}] {pdf} | Pausado por falta de cuota.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -313,13 +312,16 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    print(f"📄 [{tipo}] {pdf} | ⏱️ {duracion}s")
+    print(f"📄 [{tipo}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# PROCESO PRINCIPAL
+# ==============================================================================
 def procesar_archivos():
-    print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (DATOS PUROS | EXCEL CON 2 HOJAS)")
-    print("="*70)
+    print("\n" + "="*70, flush=True)
+    print(" MOTOR RESTREPO_2 (DATOS PUROS | EXCEL CON 2 HOJAS)", flush=True)
+    print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
     limite = None
@@ -331,7 +333,7 @@ def procesar_archivos():
             limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
         except Exception:
             limite = 5
-        print(f"🎲 MODO PRUEBA: {limite} archivos por flujo.")
+        print(f"🎲 MODO PRUEBA: {limite} archivos por flujo.", flush=True)
         etiqueta = f"PRUEBA_{limite}_archivos"
 
     ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
@@ -341,19 +343,18 @@ def procesar_archivos():
     if reiniciar:
         if os.path.exists(ruta_memoria):
             os.remove(ruta_memoria)
-            print(f"🧹 REINICIO FORZADO: Memoria eliminada.")
+            print(f"🧹 REINICIO FORZADO: Memoria eliminada.", flush=True)
         if os.path.exists(ruta_excel):
             os.remove(ruta_excel)
 
     procesados, item_counter = pulir_y_cargar_memoria(ruta_memoria)
-
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
 
     for tipo, ruta_raiz in flujos:
         if evento_cuota_agotada.is_set():
             break
 
-        print(f"\n📂 Buscando en: {tipo}...")
+        print(f"\n📂 Buscando en: {tipo}...", flush=True)
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo)
         
         pendientes = []
@@ -363,17 +364,17 @@ def procesar_archivos():
                 pendientes.append((p, r, a))
 
         ya_listos = len(todos_los_pdfs) - len(pendientes)
-        print(f"   Total en Drive: {len(todos_los_pdfs)} | Listos: {ya_listos} | A PROCESAR: {len(pendientes)}")
+        print(f"   Total en Drive: {len(todos_los_pdfs)} | Listos: {ya_listos} | A PROCESAR: {len(pendientes)}", flush=True)
 
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
 
         if not pendientes:
-            print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.")
+            print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
             continue
 
         num_trabajadores = 4
-        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} hilos...")
+        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} hilos...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -390,12 +391,12 @@ def procesar_archivos():
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
-        print("\n📧 Enviando correo de ALERTA al dueño del programa...")
+        print("\n📧 Enviando correo de ALERTA al dueño del programa...", flush=True)
         enviar_correo_alerta_cuota(ruta_excel, etiqueta)
-        print("🛑 Programa detenido de forma segura.")
+        print("🛑 Programa detenido de forma segura.", flush=True)
         sys.exit(0)
     else:
-        print("\n📧 Enviando correo de ÉXITO al dueño del programa...")
+        print("\n📧 Enviando correo de ÉXITO al dueño del programa...", flush=True)
         enviar_correo_exito(ruta_excel, etiqueta)
 
 def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
@@ -415,10 +416,77 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
                 df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
                 df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
 
-            print(f"\n✅ EXCEL GENERADO CON 2 HOJAS:")
-            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas")
-            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas")
+            print(f"\n✅ EXCEL GENERADO CON 2 HOJAS:", flush=True)
+            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas", flush=True)
+            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas", flush=True)
 
 def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        r
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
+    msg['From'] = EMAIL_REMITENTE
+    msg['To'] = EMAIL_DESTINO
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
+        f'Se ha alcanzado el límite de cuota en las claves válidas de Gemini.\n\n'
+        f'El sistema se frenó para NO inventar datos ni generar celdas vacías.\n'
+        f'Agrega más claves en GitHub Secrets para continuar.\n\n'
+        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
+        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
+        f'Saludos!'
+    )
+
+    try:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!", flush=True)
+    except Exception as e:
+        print(f"❌ Error al enviar correo de alerta: {e}", flush=True)
+
+def enviar_correo_exito(ruta_archivo, etiqueta):
+    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
+    msg['From'] = EMAIL_REMITENTE
+    msg['To'] = EMAIL_DESTINO
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
+        f'El archivo adjunto contiene las 2 hojas completas:\n'
+        f' - Hoja "Recibidas"\n'
+        f' - Hoja "Radicadas"\n\n'
+        f'Datos 100% puros y reales.\n\n'
+        f'Saludos!'
+    )
+
+    try:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print("🚀 ¡CORREO ENVIADO CON ÉXITO!", flush=True)
+    except Exception as e:
+        print(f"❌ Error al enviar correo: {e}", flush=True)
+
+# ==============================================================================
+# ORDEN DE ARRANQUE OBLIGATORIA (ESTO ERA LO QUE FALTABA AL FINAL)
+# ==============================================================================
+if __name__ == "__main__":
+    procesar_archivos()
