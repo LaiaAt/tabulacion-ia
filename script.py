@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR TURBO + CERO CONSTATADOS)
-# FILTRO DE MEMORIA UNIVERSAL | EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (FUSIÓN TOTAL + EXCEL CON 2 HOJAS)
+# 4 HILOS PARALELOS | POOL 31 CLAVES GEMINI | DATOS PUROS Y LITERALES
 # ==============================================================================
 
 import os
@@ -181,7 +181,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando la siguiente clave...", flush=True)
+                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando siguiente...", flush=True)
                     time.sleep(0.5)
                     break
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
@@ -258,34 +258,50 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
             archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
-def pulir_y_cargar_memoria(ruta_csv):
-    if os.path.exists(ruta_csv):
+def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
+    # Buscar todos los archivos CSV de memoria que contengan la carpeta (ej. 2017)
+    archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
+    
+    if not archivos_memoria:
+        return set(), 1
+
+    dfs = []
+    for f_mem in archivos_memoria:
         try:
-            df = pd.read_csv(ruta_csv)
-            if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                print("🧹 Purgando registros con CONSTATADO para asegurar datos 100% reales...", flush=True)
-                
-                # REGLA EXACTA DE TU FÓRMULA DE EXCEL: Buscar 'CONSTATADO' en cualquier columna
-                tiene_constatado = df.astype(str).apply(
-                    lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
-                ).any(axis=1)
-
-                asunto_invalido = (
-                    df["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
-                    df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("CI004_", case=False, na=False)
-                )
-
-                malos = tiene_constatado | asunto_invalido
-                df_limpio = df[~malos].copy()
-                df_limpio.to_csv(ruta_csv, index=False)
-                
-                # Guardar en procesados usando el basename para cruce infalible
-                procesados = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
-                item_sig = len(df_limpio) + 1
-                return procesados, item_sig
+            ruta_comp = os.path.join(RUTA_BASE, f_mem)
+            d = pd.read_csv(ruta_comp)
+            if not d.empty and "UBICACION_ARCHIVO" in d.columns:
+                dfs.append(d)
         except Exception as e:
-            print(f"⚠️ Aviso memoria: {e}", flush=True)
-    return set(), 1
+            print(f"⚠️ Aviso leyendo {f_mem}: {e}", flush=True)
+
+    if not dfs:
+        return set(), 1
+
+    print(f"🧹 Fusionando {len(dfs)} archivos de memoria existentes...", flush=True)
+    df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
+
+    # REGLA EXACTA DE TU FÓRMULA DE EXCEL: Detectar cualquier 'CONSTATADO' o filas vacías
+    tiene_constatado = df.astype(str).apply(
+        lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
+    ).any(axis=1)
+
+    asunto_invalido = (
+        df["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
+        df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("CI004_", case=False, na=False)
+    )
+
+    malos = tiene_constatado | asunto_invalido
+    df_limpio = df[~malos].copy()
+    df_limpio.to_csv(ruta_memoria_final, index=False)
+
+    print(f"✅ Memorias fusionadas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas con CONSTATADO que serán reparadas por Gemini.", flush=True)
+
+    # Devolver los nombres limpios de los archivos que ya están buenos
+    procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
+    item_sig = len(df_limpio) + 1
+    return procesados_basenames, item_sig
 
 def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     if evento_cuota_agotada.is_set():
@@ -327,7 +343,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (DATOS PUROS | EXCEL CON 2 HOJAS)", flush=True)
+    print(" MOTOR RESTREPO_2 (FUSIÓN TOTAL + EXCEL CON 2 HOJAS)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -343,18 +359,154 @@ def procesar_archivos():
         print(f"🎲 MODO PRUEBA: {limite} archivos por flujo.", flush=True)
         etiqueta = f"PRUEBA_{limite}_archivos"
 
-    posibles_memorias = [
-        os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_Año_{carpeta_objetivo}.csv'),
-        os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
-    ]
-    ruta_memoria = next((f for f in posibles_memorias if os.path.exists(f)), posibles_memorias[0])
+    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
     ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
 
     reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
     if reiniciar:
-        for m in posibles_memorias:
-            if os.path.exists(m):
-                os.remove(m)
-                print(f"🧹 REINICIO FORZADO: Memoria {m} eliminada.", flush=True)
+        archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
+        for m in archivos_memoria:
+            os.remove(os.path.join(RUTA_BASE, m))
+            print(f"🧹 REINICIO FORZADO: Memoria {m} eliminada.", flush=True)
         if os.path.exists(ruta_excel):
             os.remove(ruta_excel)
+
+    procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria)
+    flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
+
+    for tipo, ruta_raiz in flujos:
+        if evento_cuota_agotada.is_set():
+            break
+
+        print(f"\n📂 Buscando en: {tipo}...", flush=True)
+        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo)
+        
+        pendientes = []
+        for p, r, a in todos_los_pdfs:
+            if os.path.basename(p).lower() not in procesados_basenames:
+                pendientes.append((p, r, a))
+
+        ya_listos = len(todos_los_pdfs) - len(pendientes)
+        print(f"   Total en Drive: {len(todos_los_pdfs)} | Listos: {ya_listos} | A PROCESAR: {len(pendientes)}", flush=True)
+
+        if limite and len(pendientes) > limite:
+            pendientes = random.sample(pendientes, limite)
+
+        if not pendientes:
+            print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
+            continue
+
+        num_trabajadores = 4
+        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} hilos...", flush=True)
+
+        with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
+            futuros = []
+            for pdf, ruta_completa, anio_doc in pendientes:
+                if evento_cuota_agotada.is_set():
+                    break
+                f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria)
+                futuros.append(f)
+                item_counter += 1
+
+            for f in as_completed(futuros):
+                pass
+
+    generar_excel_dos_hojas(ruta_memoria, ruta_excel)
+
+    if evento_cuota_agotada.is_set():
+        print("\n📧 Enviando correo de ALERTA al dueño del programa...", flush=True)
+        enviar_correo_alerta_cuota(ruta_excel, etiqueta)
+        print("🛑 Programa detenido de forma segura.", flush=True)
+        sys.exit(0)
+    else:
+        print("\n📧 Enviando correo de ÉXITO al dueño del programa...", flush=True)
+        enviar_correo_exito(ruta_excel, etiqueta)
+
+def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
+    if os.path.exists(ruta_memoria):
+        df_final = pd.read_csv(ruta_memoria)
+        if not df_final.empty:
+            es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
+            df_recibidas = df_final[es_recibida].copy()
+            df_radicadas = df_final[~es_recibida].copy()
+
+            if not df_recibidas.empty:
+                df_recibidas["ÍTEM"] = range(1, len(df_recibidas) + 1)
+            if not df_radicadas.empty:
+                df_radicadas["ÍTEM"] = range(1, len(df_radicadas) + 1)
+
+            with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
+                df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
+                df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
+
+            print(f"\n✅ EXCEL CON 2 HOJAS ACTUALIZADO:", flush=True)
+            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas", flush=True)
+            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas", flush=True)
+
+def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
+    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
+    msg['From'] = EMAIL_REMITENTE
+    msg['To'] = EMAIL_DESTINO
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
+        f'Se ha alcanzado el límite de cuota en las claves válidas de Gemini.\n\n'
+        f'El sistema se frenó para NO inventar datos ni generar celdas vacías.\n'
+        f'Agrega más claves en GitHub Secrets para continuar.\n\n'
+        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
+        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
+        f'Saludos!'
+    )
+
+    try:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!", flush=True)
+    except Exception as e:
+        print(f"❌ Error al enviar correo de alerta: {e}", flush=True)
+
+def enviar_correo_exito(ruta_archivo, etiqueta):
+    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
+    msg['From'] = EMAIL_REMITENTE
+    msg['To'] = EMAIL_DESTINO
+    msg.set_content(
+        f'Hola Eduardo,\n\n'
+        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
+        f'El archivo adjunto contiene las 2 hojas completas:\n'
+        f' - Hoja "Recibidas"\n'
+        f' - Hoja "Radicadas"\n\n'
+        f'Datos 100% puros y reales.\n\n'
+        f'Saludos!'
+    )
+
+    try:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print("🚀 ¡CORREO ENVIADO CON ÉXITO!", flush=True)
+    except Exception as e:
+        print(f"❌ Error al enviar correo: {e}")
+
+if __name__ == "__main__":
+    procesar_archivos()
