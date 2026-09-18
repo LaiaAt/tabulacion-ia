@@ -1,6 +1,7 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (REPARTO MATEMÁTICO EQUITATIVO DE 31 CLAVES)
-# DISTRIBUCIÓN POR CARTA | ROTACIÓN SIN ATASCOS | EXCEL CON 2 HOJAS
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MODELOS OFICIALES GEMINI 3.X | 0 RELLENOS)
+# ENDPOINTS: 3.8-FLASH -> 3.7-FLASH -> 3.6-FLASH -> 3.5-FLASH -> 3.1-FLASH-LITE
+# POOL 31 CLAVES | EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
 # ==============================================================================
 
 import os
@@ -146,8 +147,17 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# MOTOR CON REPARTO MATEMÁTICO EQUITATIVO Y REPORTE DE ERRORES REAL
+# MODELOS OFICIALES ACTIVOS EN TU GOOGLE AI STUDIO (GEMINI 3.X)
 # ==============================================================================
+MODELOS_GEMINI_OFICIALES = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite"
+]
+
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None
@@ -156,10 +166,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
     part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
-    modelos_gemini = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
     total_keys = len(gemini_clients)
-
-    # CADA CARTA ARRANCA CON UNA CLAVE DISTINTA: item_num % total_keys
     start_idx = item_num % total_keys
 
     for intento in range(total_keys):
@@ -169,7 +176,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
-        for mod in modelos_gemini:
+        for mod in MODELOS_GEMINI_OFICIALES:
             try:
                 r = client.models.generate_content(
                     model=mod, contents=[part_img, prompt_final],
@@ -181,13 +188,12 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} saturada de velocidad (429). Probando siguiente...", flush=True)
+                    print(f"      ⚠️ {nombre_key} saturada de cuota (429). Probando siguiente...", flush=True)
                     break
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ⚠️ {nombre_key} rechazada por Google (Límite 0 o no habilitada). Probando siguiente...", flush=True)
+                    print(f"      ⚠️ {nombre_key} no autorizada en este proyecto. Probando siguiente...", flush=True)
                     break
                 else:
-                    print(f"      ⚠️ {nombre_key} ({mod}): {err[:70]}", flush=True)
                     continue
 
     return None
@@ -304,8 +310,6 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
-    
-    # Se le envía item_num para asignar la clave matemáticamente
     datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num)
 
     if datos is None:
@@ -333,12 +337,9 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     print(f"📄 [{tipo}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
-# ==============================================================================
-# PROCESO PRINCIPAL
-# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (REPARTO EQUITATIVO DE 31 CLAVES)", flush=True)
+    print(" MOTOR RESTREPO_2 (MODELOS OFICIALES GEMINI 3.X)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
