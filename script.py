@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (ROTACIÓN OBLIGATORIA + AUTO-EXPULSIÓN)
-# 4 HILOS PARALELOS | AUTO-PURGA DE CLAVES RECHAZADAS | CERO ATASCOS
+# SISTEMA DE TABULACIÓN RESTREPO_2 (ROTACIÓN PERSISTENTE | CERO EXPULSIONES)
+# PRUEBA TODAS LAS CLAVES | SI FUNCIONA LA MANTIENE | EXCEL 2 HOJAS
 # ==============================================================================
 
 import os
@@ -37,7 +37,7 @@ for i, k in enumerate(lista_keys, 1):
         print(f"⚠️ Error cargando clave Gemini #{i}: {e}")
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves rotativas.")
+    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas para probar.")
 else:
     print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.")
 
@@ -145,7 +145,7 @@ def parsear_json(texto):
     except: return None
 
 # ==============================================================================
-# MOTOR CON ROTACIÓN OBLIGATORIA Y AUTO-PURGA DE CLAVES INVÁLIDAS
+# MOTOR CON ROTACIÓN CONTINUA (SI FUNCIONA LA MANTIENE, SI FALLA PASA A OTRA)
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     global current_key_idx, gemini_clients
@@ -157,27 +157,15 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
     modelos_gemini = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+    total_keys = len(gemini_clients)
 
-    with lock_key:
-        total_keys = len(gemini_clients)
-
-    if total_keys == 0:
-        evento_cuota_agotada.set()
-        return None
-
-    for _ in range(total_keys):
+    for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None
 
         with lock_key:
-            if not gemini_clients:
-                evento_cuota_agotada.set()
-                return None
-            current_key_idx = current_key_idx % len(gemini_clients)
-            idx = current_key_idx
+            idx = (current_key_idx + intento) % total_keys
             nombre_key, client = gemini_clients[idx]
-            # AVANCE OBLIGATORIO: El próximo hilo tomará la siguiente clave de inmediato
-            current_key_idx = (current_key_idx + 1) % len(gemini_clients)
 
         for mod in modelos_gemini:
             try:
@@ -187,21 +175,26 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
+                    # ¡Éxito! Mantenemos esta clave activa para el siguiente documento
+                    with lock_key:
+                        current_key_idx = idx
                     return d
             except Exception as e:
                 err = str(e).upper()
-                # 1. Si la clave es rechazada o inválida (ej. las claves AQ.), expulsarla del pool
-                if any(k in err for k in ["API_KEY_INVALID", "API KEY NOT VALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} expulsada del pool (Clave rechazada/inválida por Google).")
-                    with lock_key:
-                        gemini_clients = [c for c in gemini_clients if c[0] != nombre_key]
-                    break
-                # 2. Si es 429 de velocidad, pasar a la siguiente clave
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "LIMIT_EXCEEDED"]):
-                    print(f"      ⚠️ {nombre_key} saturada (429). Rotando a la siguiente clave...")
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                    print(f"      ⚠️ {nombre_key} sin cuota/saturada (429). Probando la siguiente clave...")
                     time.sleep(0.5)
                     break
-                continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    print(f"      ⚠️ {nombre_key} no habilitada en este proyecto. Probando siguiente...")
+                    break
+                else:
+                    continue
+
+        # Si esta clave falló, avanzamos el índice para probar la siguiente
+        with lock_key:
+            if current_key_idx == idx:
+                current_key_idx = (current_key_idx + 1) % total_keys
 
     return None
 
@@ -220,20 +213,15 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     ia_asunto = clean(datos.get("ASUNTO", ""))
     ia_fecha = clean(datos.get("FECHA", ""))
 
-    # Rescate de Consorcio 4C
     if "consorcio 4c" in texto_pag1.lower() or "ci.004" in texto_pag1.lower() or tipo_flujo in ["RADICADAS", "ENVIADAS"]:
-        if not ia_rem:
-            ia_rem = "CONSORCIO 4C"
+        if not ia_rem: ia_rem = "CONSORCIO 4C"
         m_g = re.search(r'CI\.?004[/\s_]+(?:GP\s*)?0*(\d{1,4})', texto_completo, re.IGNORECASE)
-        if m_g and not rad_rem:
-            rad_rem = f"GP-{m_g.group(1).zfill(4)}"
+        if m_g and not rad_rem: rad_rem = f"GP-{m_g.group(1).zfill(4)}"
 
-    # Rescate de ALMA-R
     m_almar = re.search(r'\b(ALMA-R[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
     if m_almar and not rad_dest:
         rad_dest = m_almar.group(1).replace(' ', '-')
 
-    # Limpieza de nombres de archivo colados
     if rad_dest.lower().endswith(".pdf") or "ci004" in rad_dest.lower() or len(rad_dest) > 25:
         m_gp = re.search(r'GP[-_]?(\d{3,6})', rad_dest, re.IGNORECASE)
         rad_dest = f"GP-{m_gp.group(1)}" if m_gp else ""
@@ -277,7 +265,7 @@ def pulir_y_cargar_memoria(ruta_csv):
         try:
             df = pd.read_csv(ruta_csv)
             if not df.empty and "UBICACION_ARCHIVO" in df.columns:
-                print("🧹 Purgando registros defectuosos...")
+                print("🧹 Purgando registros con textos de relleno...")
                 malos = (
                     df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("SIN ASUNTO|CI004", case=False, na=True) |
                     df["RAZON SOCIAL REMITENTE"].astype(str).str.contains("SIN REMITENTE", case=False, na=True) |
@@ -304,7 +292,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
     datos = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo)
 
     if datos is None:
-        print(f"⏸️ [{tipo}] {pdf} | Pausado por cuota (no se inventan datos).")
+        print(f"⏸️ [{tipo}] {pdf} | Pausado por falta de cuota.")
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -330,7 +318,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria):
 
 def procesar_archivos():
     print("\n" + "="*70)
-    print(" MOTOR RESTREPO_2 (ROTACIÓN OBLIGATORIA + EXCEL 2 HOJAS)")
+    print(" MOTOR RESTREPO_2 (DATOS PUROS | EXCEL CON 2 HOJAS)")
     print("="*70)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -358,6 +346,7 @@ def procesar_archivos():
             os.remove(ruta_excel)
 
     procesados, item_counter = pulir_y_cargar_memoria(ruta_memoria)
+
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
 
     for tipo, ruta_raiz in flujos:
@@ -426,74 +415,10 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
                 df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
                 df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
 
-            print(f"\n✅ EXCEL CON 2 HOJAS ACTUALIZADO:")
-            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas reales")
-            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas reales")
+            print(f"\n✅ EXCEL GENERADO CON 2 HOJAS:")
+            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas")
+            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas")
 
 def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        return
-
-    msg = EmailMessage()
-    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
-        f'Se ha alcanzado el límite de cuota (Error 429) en las claves válidas de Gemini.\n\n'
-        f'El sistema se frenó para NO inventar datos ni generar celdas vacías.\n'
-        f'Agrega más claves en GitHub Secrets para continuar.\n\n'
-        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
-        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
-        f'Saludos!'
-    )
-
-    try:
-        if os.path.exists(ruta_archivo):
-            with open(ruta_archivo, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(ruta_archivo)
-            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!")
-    except Exception as e:
-        print(f"❌ Error al enviar correo de alerta: {e}")
-
-def enviar_correo_exito(ruta_archivo, etiqueta):
-    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        return
-
-    msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
-        f'El archivo adjunto contiene las 2 hojas completas:\n'
-        f' - Hoja "Recibidas"\n'
-        f' - Hoja "Radicadas"\n\n'
-        f'Datos 100% puros y reales.\n\n'
-        f'Saludos!'
-    )
-
-    try:
-        if os.path.exists(ruta_archivo):
-            with open(ruta_archivo, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(ruta_archivo)
-            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
-            smtp.send_message(msg)
-        print("🚀 ¡CORREO ENVIADO CON ÉXITO A TU GMAIL!")
-    except Exception as e:
-        print(f"❌ Error al enviar correo de éxito: {e}")
-
-if __name__ == "__main__":
-    procesar_archivos()
+        r
