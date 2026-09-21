@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Fusión de Memorias y Descarga Quirúrgica Estricta
+      - name: Descarga Quirúrgica Reparadora
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -74,16 +74,14 @@ jobs:
           fi
 
           python -c "
-          import os, pandas as pd
+          import os, re, pandas as pd
 
           carpeta = '${{ inputs.carpeta_objetivo }}'
           es_prueba = '${{ inputs.es_prueba }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
           archivo_unificado = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
-          # 1. Buscar y fusionar todos los CSVs de memoria existentes para esta carpeta
           archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
-          
           buenos_filenames = set()
 
           if archivos_memoria and not reiniciar and es_prueba != 'si':
@@ -93,39 +91,49 @@ jobs:
                       d = pd.read_csv(f_mem)
                       if not d.empty and 'UBICACION_ARCHIVO' in d.columns:
                           dfs.append(d)
-                  except Exception as e:
-                      print(f'Aviso leyendo {f_mem}: {e}')
+                  except Exception:
+                      pass
 
               if dfs:
                   df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
-                  
-                  # FÓRMULA DE EXCEL: Buscar CONSTATADO o SIN RADICADO en cualquier columna
+
+                  # Limpieza previa de ruido de código de barras
+                  df['ASUNTO / TIPO DOCUMENTAL'] = df['ASUNTO / TIPO DOCUMENTAL'].astype(str).apply(
+                      lambda x: re.sub(r'[1lI\|]{5,}', ' ', x).strip()
+                  )
+
+                  # Detección estricta de cualquier fila defectuosa
                   tiene_constatado = df.astype(str).apply(
                       lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
                   ).any(axis=1)
 
-                  asunto_invalido = (
-                      df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A']) |
+                  asunto_malo = (
+                      df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
                       df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('CI004_', case=False, na=False)
                   )
 
-                  malos = tiene_constatado | asunto_invalido
+                  dest_vacio = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                  
+                  rad_vacio = (
+                      df['No. RADICADO REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
+                      df['No. RADICADO DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                  )
+
+                  malos = tiene_constatado | asunto_malo | dest_vacio | rad_vacio
                   df_bueno = df[~malos]
                   df_bueno.to_csv(archivo_unificado, index=False)
 
-                  print(f'✅ Memorias fusionadas: {len(df_bueno)} cartas buenas conservadas.')
-                  print(f'🎯 Detectadas {malos.sum()} cartas con CONSTATADO para re-descargar y reparar.')
+                  print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
+                  print(f'🎯 Detectadas {malos.sum()} cartas defectuosas para descargar y reparar.')
 
                   for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                       buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
 
-          # 2. Leer archivos que existen en Drive
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
               todos_rec = [line.strip() for line in f if line.strip()]
 
-          # 3. Descargar ÚNICAMENTE los que no están en la lista de cartas buenas
           descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos_filenames]
           descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos_filenames]
 
@@ -135,10 +143,9 @@ jobs:
               descargar_env = random.sample(descargar_env, min(len(descargar_env), limite))
               descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
 
-          print(f'\n🚀 DESCARGA QUIRÚRGICA REAL:')
+          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
           print(f'   - Enviadas/Radicadas a descargar: {len(descargar_env)}')
           print(f'   - Recibidas a descargar: {len(descargar_rec)}')
-          print(f'   (Las {len(buenos_filenames)} cartas buenas NO se descargarán)')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
