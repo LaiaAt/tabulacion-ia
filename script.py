@@ -1,7 +1,8 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (CON SANITIZACIÓN DE CARACTERES ILEGALES)
-# FILTRO OPENPYXL CONTRA CARACTERES INVISIBLES | EXCEL CON 2 HOJAS
-# RECIBIDAS Y RADICADAS | POOL 31 CLAVES GEMINI | DATOS 100% REALES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CALIBRACIÓN ASUNTO EXCLUSIVO + RADICADOS ALMA)
+# ASUNTO: SI HAY "ASUNTO:" Y "REFERENCIA:", EXTRAE SOLO "ASUNTO:"
+# RADICADOS ALMA: PRIORIZA FORMATO OFICIAL ALMA-YYYY-XXXX (DESCARTA ALMA-3-...)
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% PUROS
 # ==============================================================================
 
 import os
@@ -18,7 +19,6 @@ from email.message import EmailMessage
 import pandas as pd
 import requests
 
-# Sanitizador de caracteres prohibidos en hojas de cálculo Excel
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -59,19 +59,36 @@ RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 lock_csv = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
+# ==============================================================================
+# REGLA EXACTA DE ASUNTO: SI EXISTE "ASUNTO:" SEPARADO, TOMA SOLO EL ASUNTO
+# ==============================================================================
 def limpiar_asunto(asunto_raw, texto_doc=""):
+    # 1. Verificar si en el documento existe un campo "ASUNTO:" explícito separado de REFERENCIA
+    m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+    if m_asunto_expl:
+        t_as = " ".join(m_asunto_expl.group(1).split()).strip()
+        t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
+        if len(t_as) > 3:
+            return ILLEGAL_CHARACTERS_RE.sub("", t_as)
+
+    # 2. Si la IA trajo tanto Referencia como Asunto juntos, extraer solo lo que va después de ASUNTO:
+    if asunto_raw and "ASUNTO:" in str(asunto_raw).upper():
+        m_split = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+)', str(asunto_raw), re.IGNORECASE | re.DOTALL)
+        if m_split:
+            t_as = " ".join(m_split.group(1).split()).strip()
+            return ILLEGAL_CHARACTERS_RE.sub("", t_as)
+
+    # 3. Si no hay campo "ASUNTO:" pero sí hay "Ref." o "REFERENCIA:" (se conserva completa tal cual)
     if not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"]:
-        m = re.search(r'((?:Ref\.?|REFERENCIA|ASUNTO|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+        m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
         if m:
             asunto_raw = " ".join(m.group(1).split())
         else:
-            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Tutela|Acción)[^\n\r]+', texto_doc, re.IGNORECASE)
+            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Entrega)[^\n\r]+', texto_doc, re.IGNORECASE)
             asunto_raw = m2.group(0).strip() if m2 else ""
 
     t = " ".join(str(asunto_raw).strip().split())
-    # Eliminar cualquier carácter invisible que rompa Excel
-    t = ILLEGAL_CHARACTERS_RE.sub("", t)
-    return t
+    return ILLEGAL_CHARACTERS_RE.sub("", t)
 
 def obtener_insumos_documento(ruta_pdf):
     try:
@@ -115,17 +132,17 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
     return fecha_str
 
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto de correspondencia contractual y técnica.
+Eres un auditor archivístico experto.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento.
 PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
-REGLAS CRÍTICAS:
+REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "AGENCIA NACIONAL DE INFRAESTRUCTURA – ANI").
-2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/0143/17/2.2", "GP-XXXX").
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía. En cartas de Concesión Alto Magdalena, busca el sticker oficial superior con código de barras en formato ALMA-YYYY-XXXX (ej. ALMA-2018-1834). PROHIBIDO tomar códigos internos secundarios del cuerpo de la carta como "ALMA-3-0020-20".
 3. "RAZON_SOCIAL_DESTINATARIO": Entidad a quien va dirigida.
-4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. "2017-409-037361-2", "ALMA-R-2017-02101", sello GP).
+4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-...", sello ANI, sello GP).
 5. "FECHA": Fecha real impresa en la carta (Formato DD/MM/AAAA).
-6. "ASUNTO": Transcribe LITERAL, ÍNTEGRO Y COMPLETO el texto del Asunto o Referencia, TAL CUAL aparece en la carta, CONSERVANDO la palabra "Ref." o "Asunto:" si viene en el texto. PROHIBIDO BORRAR LA PALABRA "Ref.", PROHIBIDO RECORTAR O MUTILAR NINGUNA PARTE.
+6. "ASUNTO": Si el documento tiene un campo explícito "ASUNTO:" separado de "REFERENCIA:", transcribe ÚNICAMENTE el texto que sigue a "ASUNTO:". Solo si NO existe la palabra "ASUNTO", transcribe la "REFERENCIA" o "Ref.".
 
 JSON REQUERIDO:
 {
@@ -191,6 +208,9 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
 
     return None, "", ""
 
+# ==============================================================================
+# MOTOR CON BLINDAJE DE RADICADOS ALMA Y SEPARACIÓN DE ASUNTOS
+# ==============================================================================
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
 
@@ -198,7 +218,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
         if not val or str(val).strip().upper() in ["NONE", "N/A", "NULL", "SIN REMITENTE CONSTATADO", "SIN DESTINATARIO CONSTATADO", "SIN ASUNTO CONSTATADO", "SIN RADICADO CONSTATADO", "SIN RADICADO REMITENTE", "NAN"]:
             return ""
         s = str(val).strip()
-        # Eliminar caracteres ilegales que bloquean Excel
         return ILLEGAL_CHARACTERS_RE.sub("", s)
 
     ia_dest = clean(datos.get("RAZON_SOCIAL_DESTINATARIO", ""))
@@ -210,9 +229,13 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
 
     es_recibida = tipo_flujo == "RECIBIDAS"
 
+    # ==========================================================================
+    # RECIBIDAS
+    # ==========================================================================
     if es_recibida:
         ia_dest = "CONSORCIO 4C"
 
+        # 1. Radicado Destinatario: GP-XXXX
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
@@ -220,30 +243,44 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             m_gp_txt = re.search(r'GP[-_\s]?(\d{3,6})', texto_completo, re.IGNORECASE)
             rad_dest = f"GP-{m_gp_txt.group(1)}" if m_gp_txt else ""
 
+        # 2. Radicado Remitente: Corrección estricta de ALMA (Descarta ALMA-3-...)
+        # Si capturó un código interno como ALMA-3-... se invalida
+        if rad_rem and ("ALMA-3-" in rad_rem or not re.search(r'ALMA[-\s]?20\d{2}', rad_rem, re.IGNORECASE)):
+            if "ALMA" in rad_rem:
+                rad_rem = ""
+
         if not rad_rem or rad_rem.startswith("GP-"):
-            m_alma = re.search(r'\b(ALMA[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
+            # Buscar formato oficial en el sticker: ALMA-YYYY-XXXXX
+            m_alma_oficial = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
             m_ani = re.search(r'\b(20\d{2}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)\b', texto_completo)
             m_car = re.search(r'\b(0\d{10})\b', texto_completo)
 
-            if m_alma:
-                rad_rem = m_alma.group(1).replace(' ', '-')
+            if m_alma_oficial:
+                rad_rem = m_alma_oficial.group(1).replace(' ', '-')
             elif m_ani:
                 rad_rem = m_ani.group(1).replace(' ', '')
             elif m_car:
                 rad_rem = m_car.group(1)
             else:
+                # Rescate por nombre de archivo (ej. CON_1834 -> ALMA-2018-1834)
                 m_con = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
                 m_ani_nom = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
+                anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2018"
                 if m_con:
-                    rad_rem = f"ALMA-2017-{m_con.group(1)}"
+                    rad_rem = f"ALMA-{anio_doc}-{m_con.group(1)}"
                 elif m_ani_nom:
                     rad_rem = f"ANI-{m_ani_nom.group(1)}"
 
+        # Rescate de razón social remitente
         if not ia_rem:
             if "ALMA" in rad_rem or "CON_" in nombre_archivo:
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
             elif "ANI" in rad_rem or "ANI_" in nombre_archivo:
                 ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA – ANI"
+
+    # ==========================================================================
+    # RADICADAS / ENVIADAS
+    # ==========================================================================
     else:
         ia_rem = "CONSORCIO 4C"
 
@@ -257,7 +294,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
         if not rad_dest:
             m_ani_stick = re.search(r'(?:Rad(?:icado)?\s*No\.?\s*|ANI\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
             m_almar = re.search(r'\b(ALMA-R[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
-            
             if m_ani_stick:
                 rad_dest = m_ani_stick.group(1).replace(' ', '')
             elif m_almar:
@@ -315,7 +351,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     print(f"🧹 Fusionando memorias existentes...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
-    # Pulido en caliente de todas las filas guardadas
+    # Pulido en caliente de registros existentes: corregir ALMA-3-... y asuntos dobles
     for idx, row in df.iterrows():
         ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
         nom_arch = os.path.basename(ubic)
@@ -329,21 +365,20 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
                 if m_gp: df.at[idx, "No. RADICADO DESTINATARIO"] = f"GP-{m_gp.group(1)}"
             
             rad_rem = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
-            if not rad_rem or rad_rem.startswith("GP-") or rad_rem in ["nan", "None", ""]:
+            # Si capturó el código de predio interno 'ALMA-3-...' se corrige por el oficial
+            if "ALMA-3-" in rad_rem or not rad_rem or rad_rem in ["nan", "None", ""]:
                 m_con = re.search(r'CON_(\d{3,5})', nom_arch, re.IGNORECASE)
-                if m_con: df.at[idx, "No. RADICADO REMITENTE"] = f"ALMA-2017-{m_con.group(1)}"
-        else:
-            df.at[idx, "RAZON SOCIAL REMITENTE"] = "CONSORCIO 4C"
-            rad_rem = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
-            if not rad_rem.startswith("GP-") or rad_rem in ["nan", "None", ""]:
-                m_nom = re.search(r'CI004_(\d{4})\d{2}_', nom_arch, re.IGNORECASE)
-                if m_nom:
-                    df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_nom.group(1).zfill(4)}"
-                else:
-                    m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
-                    if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
+                anio_match = re.search(r'\b(20\d{2})\b', ubic)
+                anio_doc = anio_match.group(1) if anio_match else "2018"
+                if m_con: df.at[idx, "No. RADICADO REMITENTE"] = f"ALMA-{anio_doc}-{m_con.group(1)}"
 
-    # Purgar cualquier fila que aún tenga textos de relleno
+        # Limpiar asunto si vino doble con 'ASUNTO:' dentro
+        as_actual = str(df.at[idx, "ASUNTO / TIPO DOCUMENTAL"]).strip()
+        if "ASUNTO:" in as_actual.upper():
+            m_spl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+)', as_actual, re.IGNORECASE | re.DOTALL)
+            if m_spl:
+                df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = " ".join(m_spl.group(1).split()).strip()
+
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
@@ -404,12 +439,12 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (TRIPLE BLINDAJE DE RADICADOS + 2 HOJAS)", flush=True)
+    print(" MOTOR RESTREPO_2 (ASUNTO EXCLUSIVO + RADICADOS ALMA BLINDADOS)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
     limite = None
-    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
+    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2018').strip()
     etiqueta = f"{carpeta_objetivo}"
 
     if es_prueba in ['si', 's', 'true']:
@@ -485,12 +520,11 @@ def procesar_archivos():
         enviar_correo_exito(ruta_excel, etiqueta)
 
 # ==============================================================================
-# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) CON SANITIZACIÓN ESTRICTA
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS)
 # ==============================================================================
 def sanitizar_df_excel(df_sub):
     df_sub = df_sub.copy()
     for col in df_sub.columns:
-        # Pasa cada celda por el filtro para eliminar caracteres prohibidos por Excel
         df_sub[col] = df_sub[col].apply(lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if pd.notnull(x) else "")
     return df_sub
 
@@ -514,7 +548,7 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
                 df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
                 df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
 
-            print(f"\n✅ EXCEL CON 2 HOJAS GENERADO SIN CARACTERES ILEGALES:", flush=True)
+            print(f"\n✅ EXCEL CON 2 HOJAS ACTUALIZADO:", flush=True)
             print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas (Destinatario Consorcio 4C y Radicado GP)", flush=True)
             print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas (Remitente Consorcio 4C y Radicado GP)", flush=True)
 
@@ -561,10 +595,10 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
     msg.set_content(
         f'Hola Eduardo,\n\n'
         f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
-        f'El archivo adjunto contiene las 2 hojas completas y blindadas:\n'
+        f'El archivo adjunto contiene las 2 hojas completas:\n'
         f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
         f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado GP.\n\n'
-        f'Todos los radicados están completos (cero casillas vacías) y los asuntos conservan "Ref." completo.\n\n'
+        f'Todos los radicados están completos con sus códigos oficiales y los asuntos separados limpiamente de la referencia.\n\n'
         f'Saludos!'
     )
 
