@@ -97,34 +97,25 @@ jobs:
               if dfs:
                   df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
 
-                  # Limpieza previa de ruido de código de barras
-                  df['ASUNTO / TIPO DOCUMENTAL'] = df['ASUNTO / TIPO DOCUMENTAL'].astype(str).apply(
-                      lambda x: re.sub(r'[1lI\|]{5,}', ' ', x).strip()
-                  )
-
-                  # Detección estricta de cualquier fila defectuosa
-                  tiene_constatado = df.astype(str).apply(
-                      lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)
-                  ).any(axis=1)
-
-                  asunto_malo = (
-                      df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-                      df['ASUNTO / TIPO DOCUMENTAL'].astype(str).str.contains('CI004_', case=False, na=False)
-                  )
-
-                  dest_vacio = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                  # Purgar filas con textos basura, notificaciones de correo o texto corrupto
+                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
                   
-                  rad_vacio = (
+                  malos = (
+                      df.astype(str).apply(lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)).any(axis=1) |
+                      asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
+                      asunto_str.str.contains('CI004_', case=False, na=False) |
+                      asunto_str.str.contains('Delivery Status|mailbox unavailable|Diagnostic-Code|Reflector Flasher', case=False, na=False) |
+                      (asunto_str.str.len() > 350) |
+                      df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
                       df['No. RADICADO REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
                       df['No. RADICADO DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
                   )
 
-                  malos = tiene_constatado | asunto_malo | dest_vacio | rad_vacio
                   df_bueno = df[~malos]
                   df_bueno.to_csv(archivo_unificado, index=False)
 
                   print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
-                  print(f'🎯 Detectadas {malos.sum()} cartas defectuosas para descargar y reparar.')
+                  print(f'🎯 Detectadas {malos.sum()} cartas con asuntos basura o incompletos para re-tabular.')
 
                   for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                       buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
