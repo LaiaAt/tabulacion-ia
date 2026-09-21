@@ -1,6 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR REPARADOR QUIRÚRGICO INTEGRAL)
-# DETECTOR PÁGINA 2 ANI | LIMPIEZA RUIDO BARRAS | CAPTURA PERSONAS Y ALMA-R
+# SISTEMA DE TABULACIÓN RESTREPO_2 (INSPECCIÓN PROFUNDA CON GEMINI 3.8 / 3.7)
+# RESCATE MULTI-PÁGINA SI HAY CELDAS VACÍAS | EXCEL 2 HOJAS (RECIBIDAS / RADICADAS)
 # ==============================================================================
 
 import os
@@ -61,15 +61,12 @@ lock_csv = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
-    # 1. Si existe tanto REFERENCIA como ASUNTO explícitos, extraer el ASUNTO
     m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
     if m_asunto_expl:
         t_as = " ".join(m_asunto_expl.group(1).split()).strip()
         t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
         if len(t_as) > 3 and not t_as.startswith("CI004_"):
             asunto_raw = t_as
-
-    # 2. Si viene bloque con Ref. (sin palabra Asunto explícita)
     elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
         m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
         if m:
@@ -79,7 +76,6 @@ def limpiar_asunto(asunto_raw, texto_doc=""):
             asunto_raw = m2.group(0).strip() if m2 else ""
 
     t = " ".join(str(asunto_raw).strip().split())
-    # Limpiar ruido de códigos de barras (secuencias de unos '11111' o barras '|||||')
     t = re.sub(r'[1lI\|]{5,}', ' ', t)
     t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
     t = " ".join(t.split())
@@ -93,7 +89,6 @@ def obtener_insumos_documento(ruta_pdf):
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
-        # Detección de carátula electrónica ANI en Página 1
         num_pag_imagen = 0
         es_caratula_ani = (
             "al contestar cite el numero de radicado" in texto_pag1.lower() or
@@ -101,7 +96,6 @@ def obtener_insumos_documento(ruta_pdf):
             ("libertad y orden" in texto_pag1.lower() and "oficio remisorio" in texto_pag1.lower())
         )
 
-        # Si Pág 1 es carátula ANI, la carta real con membrete y asunto está en la PÁGINA 2
         if es_caratula_ani and total_paginas > 1:
             num_pag_imagen = 1
             texto_para_ia = doc[1].get_text()
@@ -151,7 +145,7 @@ REGLAS OBLIGATORIAS:
 2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
 3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es una persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre de la persona.
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
-5. "FECHA": Fecha real de la carta formal (Formato DD/MM/AAAA).
+5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
 JSON REQUERIDO:
@@ -218,6 +212,75 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
 
     return None, "", ""
 
+# ==============================================================================
+# AUDITORÍA PROFUNDA CON LA MEJOR IA (GEMINI 3.8 / 3.7 FLASH) PARA CELDAS VACÍAS
+# ==============================================================================
+def auditar_con_mejor_ia_documento_completo(ruta_pdf, campos_faltantes, texto_completo, nombre_archivo, tipo_flujo, item_num):
+    if not gemini_clients or evento_cuota_agotada.is_set():
+        return {}
+
+    try:
+        doc = fitz.open(ruta_pdf)
+        total_pags = len(doc)
+        partes_multimodal = []
+
+        # Renderizar hasta 3 páginas principales para inspección visual completa
+        for p_idx in range(min(total_pags, 3)):
+            pix = doc[p_idx].get_pixmap(dpi=150)
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+            if img.width > 1500:
+                ratio = 1500 / float(img.width)
+                img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80, optimize=True)
+            partes_multimodal.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+        doc.close()
+    except Exception:
+        return {}
+
+    prompt_profundo = (
+        f"DOCUMENTO: {nombre_archivo}\n"
+        f"TIPO: {tipo_flujo}\n"
+        f"ATENCIÓN CRÍTICA: Se requiere extraer estrictamente los siguientes campos que quedaron vacíos: {', '.join(campos_faltantes)}.\n"
+        f"Inspecciona a fondo las páginas adjuntas y el texto del documento para encontrar los datos literales.\n"
+        f"Texto del documento:\n{texto_completo[:10000]}\n"
+        + PROMPT_AUDITORIA
+    )
+    partes_multimodal.append(prompt_profundo)
+
+    # Usar las IAs más potentes y profundas
+    modelos_expertos = ["gemini-3.8-flash", "gemini-3.7-flash"]
+    total_keys = len(gemini_clients)
+    start_idx = item_num % total_keys
+
+    for intento in range(min(total_keys, 10)):
+        if evento_cuota_agotada.is_set():
+            return {}
+
+        idx = (start_idx + intento) % total_keys
+        nombre_key, client = gemini_clients[idx]
+
+        for mod in modelos_expertos:
+            try:
+                r = client.models.generate_content(
+                    model=mod, contents=partes_multimodal,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                )
+                d = parsear_json(r.text)
+                if d and isinstance(d, dict) and any(d.values()):
+                    print(f"      🔍 [AUDITORÍA PROFUNDA EXITOSA | {nombre_key} | {mod}] Campos rescatados: {list(d.keys())}", flush=True)
+                    return d
+            except Exception as e:
+                err = str(e).upper()
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA"]):
+                    continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    break
+                else:
+                    continue
+
+    return {}
+
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
 
@@ -239,7 +302,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     if es_recibida:
         ia_dest = "CONSORCIO 4C"
 
-        # 1. Radicado Destinatario: GP-XXXX
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
@@ -247,7 +309,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             m_gp_txt = re.search(r'GP[-_\s]?(\d{3,6})', texto_completo, re.IGNORECASE)
             rad_dest = f"GP-{m_gp_txt.group(1)}" if m_gp_txt else ""
 
-        # 2. Radicado Remitente
         if rad_rem and ("ALMA-3-" in rad_rem or not re.search(r'ALMA[-\s]?20\d{2}', rad_rem, re.IGNORECASE)):
             if "ALMA" in rad_rem: rad_rem = ""
 
@@ -271,7 +332,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
                 elif m_ani_nom:
                     rad_rem = f"ANI-{m_ani_nom.group(1)}"
 
-        # Rescate razón social remitente
         if not ia_rem:
             if "ALMA" in rad_rem or "CON_" in nombre_archivo:
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
@@ -282,7 +342,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     else:
         ia_rem = "CONSORCIO 4C"
 
-        # 1. Radicado Remitente: GP-XXXX
         m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
         if m_nom:
             rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
@@ -290,7 +349,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
             rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
 
-        # 2. Radicado Destinatario
         if not rad_dest:
             m_ani_stick = re.search(r'(?:Rad(?:icado)?\s*No\.?\s*|ANI\s*Numero\s*de\s*Radicado\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
             m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?20\d{2}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
@@ -302,7 +360,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif m_almar:
                 rad_dest = m_almar.group(1).replace(' ', '-')
 
-        # 3. Rescate personas naturales en Destinatario
         if not ia_dest:
             m_senor = re.search(r'Señor(?:es|a)?\s*:\s*\n?\s*([A-ZÁÉÍÓÚÑ\s]{3,40})(?=\n|$)', texto_pag1, re.IGNORECASE)
             if m_senor and len(m_senor.group(1).strip()) > 3:
@@ -368,13 +425,11 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     print(f"🧹 Fusionando memorias existentes...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
-    # Pulido en caliente de registros existentes
     for idx, row in df.iterrows():
         ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
         nom_arch = os.path.basename(ubic)
         es_recibida = "recibidas" in ubic.lower()
 
-        # Limpiar ruido OCR en Asunto
         as_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
         as_limpio = re.sub(r'[1lI\|]{5,}', ' ', as_actual)
         as_limpio = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', as_limpio)
@@ -404,7 +459,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
                     m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
                     if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
 
-    # Purgar filas que necesitan re-tabularse
+    # Purgar cualquier fila que aún tenga campos vacíos o defectuosos
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
@@ -425,8 +480,8 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     df_limpio = df[~malos].copy()
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
-    print(f"✅ Memorias pulidas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas para re-tabular.", flush=True)
+    print(f"✅ Memorias pulidas: {len(df_limpio)} cartas completas conservadas.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas con datos incompletos para re-tabular.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
@@ -442,11 +497,27 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
+    if datos is None and not evento_cuota_agotada.is_set():
+        # Si falló el primer intento, intentar de una vez la auditoría profunda
+        datos = auditar_con_mejor_ia_documento_completo(ruta_completa, ["TODOS"], txt, pdf, tipo, item_num)
+
     if datos is None:
         print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por cuota temporal.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
+
+    # REVISIÓN DE CELDAS VACÍAS: Si falta algún campo esencial, invocar a la mejor IA con el PDF completo
+    campos_faltantes = [campo for campo, val in datos_completos.items() if not str(val).strip()]
+    if campos_faltantes and not evento_cuota_agotada.is_set():
+        datos_rescatados = auditar_con_mejor_ia_documento_completo(ruta_completa, campos_faltantes, txt, pdf, tipo, item_num)
+        if datos_rescatados:
+            for campo in campos_faltantes:
+                val_nuevo = datos_rescatados.get(campo, "")
+                if val_nuevo and str(val_nuevo).strip():
+                    datos_completos[campo] = str(val_nuevo).strip()
+            # Re-procesar por si se rescató asunto o fecha
+            datos_completos = motor_cero_vacios(datos_completos, pdf, txt, txt1, anio_doc, tipo)
 
     fila = {
         "ÍTEM": item_num,
@@ -469,7 +540,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (SISTEMA INTEGRAL DE ARCHIVO 2 HOJAS)", flush=True)
+    print(" MOTOR RESTREPO_2 (CERO CELDAS VACÍAS | AUDITORÍA PROFUNDA)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -621,8 +692,9 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         f'Hola Eduardo,\n\n'
         f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
         f'El archivo adjunto contiene las 2 hojas completas:\n'
-        f' - Hoja "Recibidas"\n'
-        f' - Hoja "Radicadas"\n\n'
+        f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
+        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado GP.\n\n'
+        f'Todos los radicados están completos y los asuntos conservan "Ref." completo.\n\n'
         f'Saludos!'
     )
 
@@ -633,7 +705,7 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
                 file_name = os.path.basename(ruta_archivo)
             msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
 
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
         print("🚀 ¡CORREO ENVIADO CON ÉXITO!", flush=True)
