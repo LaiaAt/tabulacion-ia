@@ -1,6 +1,8 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (INSPECCIÓN PROFUNDA CON GEMINI 3.8 / 3.7)
-# RESCATE MULTI-PÁGINA SI HAY CELDAS VACÍAS | EXCEL 2 HOJAS (RECIBIDAS / RADICADAS)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (FASE TURBO + AUDITORÍA PROFUNDA AL FINAL)
+# FASE 1: 8 HILOS A MÁXIMA VELOCIDAD (FLASH-LITE 2s)
+# FASE 2: AL FINAL REVISA CELDAS VACÍAS CON LA MEJOR IA (GEMINI 3.8 / 3.7)
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% REALES
 # ==============================================================================
 
 import os
@@ -143,7 +145,7 @@ PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
 2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es una persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre de la persona.
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural (ej. "LEONARDO SALAZAR"), transcribe el nombre de la persona.
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
@@ -167,11 +169,11 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-MODELOS_GEMINI_OFICIALES = [
+# Modelos rápidos para la Fase 1
+MODELOS_FASE_TURBO = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.7-flash"
+    "gemini-3.5-flash"
 ]
 
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
@@ -192,7 +194,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
-        for mod in MODELOS_GEMINI_OFICIALES:
+        for mod in MODELOS_FASE_TURBO:
             try:
                 r = client.models.generate_content(
                     model=mod, contents=[part_img, prompt_final],
@@ -213,9 +215,9 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     return None, "", ""
 
 # ==============================================================================
-# AUDITORÍA PROFUNDA CON LA MEJOR IA (GEMINI 3.8 / 3.7 FLASH) PARA CELDAS VACÍAS
+# FASE 2: AUDITORÍA PROFUNDA FINAL (SOLO SE ACTIVA AL FINAL CON CELDAS VACÍAS)
 # ==============================================================================
-def auditar_con_mejor_ia_documento_completo(ruta_pdf, campos_faltantes, texto_completo, nombre_archivo, tipo_flujo, item_num):
+def auditar_documento_profundo(ruta_pdf, campos_faltantes, texto_completo, nombre_archivo, tipo_flujo, key_idx):
     if not gemini_clients or evento_cuota_agotada.is_set():
         return {}
 
@@ -224,7 +226,7 @@ def auditar_con_mejor_ia_documento_completo(ruta_pdf, campos_faltantes, texto_co
         total_pags = len(doc)
         partes_multimodal = []
 
-        # Renderizar hasta 3 páginas principales para inspección visual completa
+        # Renderizar hasta 3 páginas para inspección visual minuciosa
         for p_idx in range(min(total_pags, 3)):
             pix = doc[p_idx].get_pixmap(dpi=150)
             img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
@@ -241,23 +243,22 @@ def auditar_con_mejor_ia_documento_completo(ruta_pdf, campos_faltantes, texto_co
     prompt_profundo = (
         f"DOCUMENTO: {nombre_archivo}\n"
         f"TIPO: {tipo_flujo}\n"
-        f"ATENCIÓN CRÍTICA: Se requiere extraer estrictamente los siguientes campos que quedaron vacíos: {', '.join(campos_faltantes)}.\n"
-        f"Inspecciona a fondo las páginas adjuntas y el texto del documento para encontrar los datos literales.\n"
+        f"AUDITORÍA PROFUNDA FINAL: Faltan estrictamente estos campos: {', '.join(campos_faltantes)}.\n"
+        f"Inspecciona minuciosamente las páginas adjuntas y el texto para encontrar los datos exactos.\n"
         f"Texto del documento:\n{texto_completo[:10000]}\n"
         + PROMPT_AUDITORIA
     )
     partes_multimodal.append(prompt_profundo)
 
-    # Usar las IAs más potentes y profundas
+    # Modelos expertos más profundos
     modelos_expertos = ["gemini-3.8-flash", "gemini-3.7-flash"]
     total_keys = len(gemini_clients)
-    start_idx = item_num % total_keys
 
     for intento in range(min(total_keys, 10)):
         if evento_cuota_agotada.is_set():
             return {}
 
-        idx = (start_idx + intento) % total_keys
+        idx = (key_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
         for mod in modelos_expertos:
@@ -268,7 +269,7 @@ def auditar_con_mejor_ia_documento_completo(ruta_pdf, campos_faltantes, texto_co
                 )
                 d = parsear_json(r.text)
                 if d and isinstance(d, dict) and any(d.values()):
-                    print(f"      🔍 [AUDITORÍA PROFUNDA EXITOSA | {nombre_key} | {mod}] Campos rescatados: {list(d.keys())}", flush=True)
+                    print(f"      🔍 [AUDITORÍA FINAL RESCATADA | {nombre_key} | {mod}] Campos completados.", flush=True)
                     return d
             except Exception as e:
                 err = str(e).upper()
@@ -459,7 +460,6 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
                     m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
                     if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
 
-    # Purgar cualquier fila que aún tenga campos vacíos o defectuosos
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
@@ -481,13 +481,14 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
     print(f"✅ Memorias pulidas: {len(df_limpio)} cartas completas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas con datos incompletos para re-tabular.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas con datos incompletos a re-tabular.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
     return procesados_basenames, item_sig
 
-def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id):
+# Proceso individual en Fase Turbo (Rápido, 2 segundos)
+def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id):
     if evento_cuota_agotada.is_set():
         return False
 
@@ -497,27 +498,11 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
-    if datos is None and not evento_cuota_agotada.is_set():
-        # Si falló el primer intento, intentar de una vez la auditoría profunda
-        datos = auditar_con_mejor_ia_documento_completo(ruta_completa, ["TODOS"], txt, pdf, tipo, item_num)
-
     if datos is None:
         print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por cuota temporal.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
-
-    # REVISIÓN DE CELDAS VACÍAS: Si falta algún campo esencial, invocar a la mejor IA con el PDF completo
-    campos_faltantes = [campo for campo, val in datos_completos.items() if not str(val).strip()]
-    if campos_faltantes and not evento_cuota_agotada.is_set():
-        datos_rescatados = auditar_con_mejor_ia_documento_completo(ruta_completa, campos_faltantes, txt, pdf, tipo, item_num)
-        if datos_rescatados:
-            for campo in campos_faltantes:
-                val_nuevo = datos_rescatados.get(campo, "")
-                if val_nuevo and str(val_nuevo).strip():
-                    datos_completos[campo] = str(val_nuevo).strip()
-            # Re-procesar por si se rescató asunto o fecha
-            datos_completos = motor_cero_vacios(datos_completos, pdf, txt, txt1, anio_doc, tipo)
 
     fila = {
         "ÍTEM": item_num,
@@ -538,9 +523,12 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# PROCESO PRINCIPAL EN 2 FASES
+# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (CERO CELDAS VACÍAS | AUDITORÍA PROFUNDA)", flush=True)
+    print(" MOTOR RESTREPO_2 (FASE TURBO + AUDITORÍA PROFUNDA AL FINAL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -571,6 +559,10 @@ def procesar_archivos():
     procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
 
+    # --------------------------------------------------------------------------
+    # FASE 1: PROCESAMIENTO TURBO A MÁXIMA VELOCIDAD (8 HILOS PARALELOS)
+    # --------------------------------------------------------------------------
+    print("\n⚡ [FASE 1] Ejecutando barrido turbo de documentos...", flush=True)
     for tipo, ruta_raiz in flujos:
         if evento_cuota_agotada.is_set():
             break
@@ -594,7 +586,7 @@ def procesar_archivos():
             continue
 
         num_trabajadores = 8
-        print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} HILOS...", flush=True)
+        print(f"🚀 Procesando {len(pendientes)} cartas con {num_trabajadores} HILOS...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -602,13 +594,74 @@ def procesar_archivos():
                 if evento_cuota_agotada.is_set():
                     break
                 hilo_id = (i % num_trabajadores) + 1
-                f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
+                f = executor.submit(procesar_un_pdf_fase_turbo, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
                 futuros.append(f)
                 item_counter += 1
 
             for f in as_completed(futuros):
                 pass
 
+    # --------------------------------------------------------------------------
+    # FASE 2: AUDITORÍA PROFUNDA AL FINAL (SOLO EN LAS FILAS QUE TENGAN CELDAS VACÍAS)
+    # --------------------------------------------------------------------------
+    if os.path.exists(ruta_memoria) and not evento_cuota_agotada.is_set():
+        df_mem = pd.read_csv(ruta_memoria)
+        cols_evaluar = [
+            "RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE",
+            "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO",
+            "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"
+        ]
+
+        # Detectar qué filas tienen al menos una celda vacía o nula
+        filas_con_vacios = df_mem[
+            df_mem[cols_evaluar].isna().any(axis=1) | 
+            (df_mem[cols_evaluar].astype(str).apply(lambda col: col.str.strip().isin(['', 'nan', 'None']))).any(axis=1)
+        ]
+
+        if not filas_con_vacios.empty:
+            print(f"\n🔍 [FASE 2 FINAL] Auditoría Profunda activada: {len(filas_con_vacios)} cartas tienen celdas vacías.", flush=True)
+            print("   Invocando a Gemini 3.8 / 3.7 Flash con lectura multi-página para completarlas...", flush=True)
+
+            for num_aud, (idx, row) in enumerate(filas_con_vacios.iterrows(), 1):
+                if evento_cuota_agotada.is_set():
+                    break
+
+                ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
+                ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
+                nombre_pdf = os.path.basename(ubic_rel)
+                tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
+
+                if not os.path.exists(ruta_pdf_completa):
+                    continue
+
+                # Extraer cuáles campos están vacíos en esta fila
+                campos_vacios = [col for col in cols_evaluar if not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None']]
+
+                print(f"   [{num_aud}/{len(filas_con_vacios)}] Auditando a fondo {nombre_pdf} (Faltan: {', '.join(campos_vacios)})...", flush=True)
+
+                try:
+                    doc_aud = fitz.open(ruta_pdf_completa)
+                    txt_completo_aud = ""
+                    for p in doc_aud: txt_completo_aud += p.get_text() + "\n"
+                    doc_aud.close()
+                except Exception:
+                    txt_completo_aud = ""
+
+                datos_rescatados = auditar_documento_profundo(ruta_pdf_completa, campos_vacios, txt_completo_aud, nombre_pdf, tipo_flujo, num_aud)
+
+                if datos_rescatados:
+                    for c_vacio in campos_vacios:
+                        v_nuevo = datos_rescatados.get(c_vacio, "")
+                        if v_nuevo and str(v_nuevo).strip():
+                            df_mem.at[idx, c_vacio] = str(v_nuevo).strip()
+
+            # Guardar la memoria con los datos completados
+            df_mem.to_csv(ruta_memoria, index=False)
+            print("✅ Auditoría Profunda finalizada con éxito.", flush=True)
+
+    # --------------------------------------------------------------------------
+    # FASE 3: GENERACIÓN DE EXCEL CON 2 HOJAS Y ENVÍO POR CORREO
+    # --------------------------------------------------------------------------
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
