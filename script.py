@@ -1,7 +1,6 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR DEFINITIVO MULTI-PÁGINA Y 2 HOJAS)
-# DETECTOR CARÁTULA ANI (SALTO A PÁG 2) | FILTRO RUIDO BARRAS (11111)
-# RADICADAS: REMITENTE = CONSORCIO 4C | RECIBIDAS: DESTINATARIO = CONSORCIO 4C
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MOTOR REPARADOR QUIRÚRGICO INTEGRAL)
+# DETECTOR PÁGINA 2 ANI | LIMPIEZA RUIDO BARRAS | CAPTURA PERSONAS Y ALMA-R
 # ==============================================================================
 
 import os
@@ -62,16 +61,16 @@ lock_csv = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
-    # 1. Si existe tanto REFERENCIA como ASUNTO explícitos, extraer prioritariamente el ASUNTO
+    # 1. Si existe tanto REFERENCIA como ASUNTO explícitos, extraer el ASUNTO
     m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
     if m_asunto_expl:
         t_as = " ".join(m_asunto_expl.group(1).split()).strip()
         t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
         if len(t_as) > 3 and not t_as.startswith("CI004_"):
-            return ILLEGAL_CHARACTERS_RE.sub("", t_as)
+            asunto_raw = t_as
 
     # 2. Si viene bloque con Ref. (sin palabra Asunto explícita)
-    if not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
+    elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
         m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
         if m:
             asunto_raw = " ".join(m.group(1).split())
@@ -80,7 +79,7 @@ def limpiar_asunto(asunto_raw, texto_doc=""):
             asunto_raw = m2.group(0).strip() if m2 else ""
 
     t = " ".join(str(asunto_raw).strip().split())
-    # Eliminar ruido OCR de código de barras (1111111... o |||||)
+    # Limpiar ruido de códigos de barras (secuencias de unos '11111' o barras '|||||')
     t = re.sub(r'[1lI\|]{5,}', ' ', t)
     t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
     t = " ".join(t.split())
@@ -94,7 +93,7 @@ def obtener_insumos_documento(ruta_pdf):
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
-        # Detección de carátula electrónica de la ANI en Página 1
+        # Detección de carátula electrónica ANI en Página 1
         num_pag_imagen = 0
         es_caratula_ani = (
             "al contestar cite el numero de radicado" in texto_pag1.lower() or
@@ -102,7 +101,7 @@ def obtener_insumos_documento(ruta_pdf):
             ("libertad y orden" in texto_pag1.lower() and "oficio remisorio" in texto_pag1.lower())
         )
 
-        # Si la Pág 1 es solo carátula de envío ANI, la carta formal con el membrete y asunto real está en la PÁG 2
+        # Si Pág 1 es carátula ANI, la carta real con membrete y asunto está en la PÁGINA 2
         if es_caratula_ani and total_paginas > 1:
             num_pag_imagen = 1
             texto_para_ia = doc[1].get_text()
@@ -143,16 +142,16 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
     return fecha_str
 
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto de correspondencia contractual y técnica.
+Eres un auditor archivístico experto de correspondencia técnica y contractual.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento.
 PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
-2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/0143/17/2.2", "GP-XXXX").
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
 3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es una persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre de la persona.
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
-5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
+5. "FECHA": Fecha real de la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
 JSON REQUERIDO:
@@ -240,7 +239,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     if es_recibida:
         ia_dest = "CONSORCIO 4C"
 
-        # 1. Radicado Destinatario: SIEMPRE GP-XXXX
+        # 1. Radicado Destinatario: GP-XXXX
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
@@ -272,7 +271,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
                 elif m_ani_nom:
                     rad_rem = f"ANI-{m_ani_nom.group(1)}"
 
-        # 3. Razón Social Remitente
+        # Rescate razón social remitente
         if not ia_rem:
             if "ALMA" in rad_rem or "CON_" in nombre_archivo:
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
@@ -283,7 +282,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     else:
         ia_rem = "CONSORCIO 4C"
 
-        # 1. Radicado Remitente: SIEMPRE GP-XXXX
+        # 1. Radicado Remitente: GP-XXXX
         m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
         if m_nom:
             rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
@@ -303,7 +302,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif m_almar:
                 rad_dest = m_almar.group(1).replace(' ', '-')
 
-        # 3. Destinatario (Personas naturales o entidades)
+        # 3. Rescate personas naturales en Destinatario
         if not ia_dest:
             m_senor = re.search(r'Señor(?:es|a)?\s*:\s*\n?\s*([A-ZÁÉÍÓÚÑ\s]{3,40})(?=\n|$)', texto_pag1, re.IGNORECASE)
             if m_senor and len(m_senor.group(1).strip()) > 3:
@@ -369,10 +368,17 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     print(f"🧹 Fusionando memorias existentes...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
+    # Pulido en caliente de registros existentes
     for idx, row in df.iterrows():
         ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
         nom_arch = os.path.basename(ubic)
         es_recibida = "recibidas" in ubic.lower()
+
+        # Limpiar ruido OCR en Asunto
+        as_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
+        as_limpio = re.sub(r'[1lI\|]{5,}', ' ', as_actual)
+        as_limpio = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', as_limpio)
+        df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = " ".join(as_limpio.split())
 
         if es_recibida:
             df.at[idx, "RAZON SOCIAL DESTINATARIO"] = "CONSORCIO 4C"
@@ -385,7 +391,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
             if "ALMA-3-" in rad_rem or not rad_rem or rad_rem in ["nan", "None", ""]:
                 m_con = re.search(r'CON_(\d{3,5})', nom_arch, re.IGNORECASE)
                 anio_match = re.search(r'\b(20\d{2})\b', ubic)
-                anio_doc = anio_match.group(1) if anio_match else "2018"
+                anio_doc = anio_match.group(1) if anio_match else "2017"
                 if m_con: df.at[idx, "No. RADICADO REMITENTE"] = f"ALMA-{anio_doc}-{m_con.group(1)}"
         else:
             df.at[idx, "RAZON SOCIAL REMITENTE"] = "CONSORCIO 4C"
@@ -408,12 +414,19 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("CI004_", case=False, na=False)
     )
 
-    malos = tiene_constatado | asunto_invalido
+    dest_vacio = df["RAZON SOCIAL DESTINATARIO"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+    
+    rad_vacio = (
+        df["No. RADICADO REMITENTE"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
+        df["No. RADICADO DESTINATARIO"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+    )
+
+    malos = tiene_constatado | asunto_invalido | dest_vacio | rad_vacio
     df_limpio = df[~malos].copy()
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
     print(f"✅ Memorias pulidas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas con datos por completar.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas para re-tabular.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
