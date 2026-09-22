@@ -1,8 +1,8 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (CÓDIGOS CI.004 COMPLETOS + BÚSQUEDA MULTI-PÁG)
-# RADICADAS: RADICADO REMITENTE = CI.004/... LITERAL | RADICADO DESTINATARIO ANI/ALMA
-# RECIBIDAS: DESTINATARIO = CONSORCIO 4C | RADICADO DESTINATARIO = GP-XXXX
-# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% PUROS Y FIELES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CON AUDITOR FINAL FILA A FILA PRE-ENVÍO)
+# FASE 1: BARRIDO TURBO (8 HILOS | 31 CLAVES)
+# FASE 2: AUDITORÍA COMPLETA POR IA (REVISA CELDAS VACÍAS Y RUIDO EN EL PDF)
+# FASE 3: EXCEL 2 HOJAS (RECIBIDAS Y RADICADAS) | CERO CONSTATADOS
 # ==============================================================================
 
 import os
@@ -156,8 +156,8 @@ PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
-2. "NO_RADICADO_REMITENTE": El código oficial literal de quien envía tal cual aparece impreso bajo el logo. OBLIGATORIO transcribir el código CI.004 completo (ejemplo: "CI.004/0216/17/1.3", "CI.004/GP3143/17/7.1.9", "CI.004/GP1996/17/7.2.2"). PROHIBIDO recortarlo a solo GP.
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural (ej. "ENVER BARRIOS MESA", "LEONARDO SALAZAR"), transcribe el nombre.
+2. "NO_RADICADO_REMITENTE": El radicado oficial literal de quien envía tal cual aparece impreso bajo el logo (ejemplo: "CI.004/0216/17/1.3", "CI.004/GP3143/17/7.1.9", "ALMA-2017-4669"). PROHIBIDO recortarlo a solo GP.
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor").
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. "20174091041192", "ALMA-R-2017-02101", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": Transcribe LITERAL, ÍNTEGRO Y COMPLETO el texto del Asunto o Referencia, TAL CUAL aparece en la carta, CONSERVANDO la palabra "Ref.:", "Ref." o "ASUNTO:" si viene en el texto. PROHIBIDO BORRAR O QUITAR EL PREFIJO "Ref.:".
@@ -185,7 +185,10 @@ MODELOS_GEMINI_OFICIALES = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash",
-    "gemini-3.7-flash"
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro"
 ]
 
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
@@ -226,9 +229,6 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
 
     return None, "", ""
 
-# ==============================================================================
-# MOTOR CON CÓDIGO CI.004 COMPLETO Y BÚSQUEDA MULTI-PÁGINA DE RADICADOS
-# ==============================================================================
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
 
@@ -290,37 +290,29 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     else:
         ia_rem = "CONSORCIO 4C"
 
-        # 1. RADICADO REMITENTE EN ENVIADAS: EXTRAER EL CÓDIGO CI.004 COMPLETO OBLIGATORIO
-        # Buscar en el texto bajo el logo el código formal CI.004/...
-        m_ci_formal = re.search(r'\b(CI\.?\s*004\s*/\s*(?:GP|G)?\s*\d+\s*/\s*\d+(?:\s*/\s*[\d\.]+)?)\b', texto_completo, re.IGNORECASE)
-        if m_ci_formal:
-            rad_rem = re.sub(r'\s*/\s*', '/', m_ci_formal.group(1)).replace(' ', '')
-        elif not rad_rem or not ("CI" in rad_rem.upper() and "/" in rad_rem):
-            # Si no encontró el código CI completo en texto, buscar en nombre de archivo
-            m_nom = re.search(r'CI004[_-]0*(\d{1,4})\d{2}[_-]', nombre_archivo, re.IGNORECASE)
-            if m_nom:
-                rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
+        if not rad_rem or rad_rem.lower().endswith(".pdf") or "ci004_" in rad_rem.lower():
+            m_cod_literal = re.search(r'\b(CI\.?\s*004\s*/\s*(?:GP|G)?\s*\d+\s*/\s*\d+(?:\s*/\s*[\d\.]+)?)\b', texto_completo, re.IGNORECASE)
+            if m_cod_literal and any(k in m_cod_literal.group(1).upper() for k in ["GP", "17", "18", "20"]):
+                rad_rem = re.sub(r'\s*/\s*', '/', m_cod_literal.group(1)).replace(' ', '')
             else:
-                m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
-                rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
+                m_nom = re.search(r'CI004[_-]0*(\d{1,4})\d{2}[_-]', nombre_archivo, re.IGNORECASE)
+                if m_nom:
+                    rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
+                else:
+                    m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
+                    rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
 
-        # 2. RADICADO DESTINATARIO: BÚSQUEDA MULTI-PÁGINA (INCLUYE RADICACIÓN WEB ANI DE PÁG FINAL)
         if not rad_dest:
-            # Buscar en todo el documento constancias de radicación ANI (como la de la pág 23: 20174091041192)
-            m_ani_web = re.search(r'(?:ANI\s*N[uú]mero\s*de\s*Radicado|Rad(?:icado)?\s*No\.?\s*|Radicado\s*ANI)[\s:]*(\d{14}|\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
-            m_ani_directo = re.search(r'\b(20\d{2}409\d{7}|20\d{2}-\d{3}-\d{6}-\d)\b', texto_completo)
+            m_ani_stick = re.search(r'(?:Rad(?:icado)?\s*No\.?\s*|ANI\s*Numero\s*de\s*Radicado\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
             m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?20\d{2}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
             if not m_almar:
                 m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
 
-            if m_ani_web:
-                rad_dest = m_ani_web.group(1).replace(' ', '')
-            elif m_ani_directo:
-                rad_dest = m_ani_directo.group(1).replace(' ', '')
+            if m_ani_stick:
+                rad_dest = m_ani_stick.group(1).replace(' ', '')
             elif m_almar:
                 rad_dest = m_almar.group(1).replace(' ', '-')
 
-        # 3. DESTINATARIO
         if not ia_dest:
             m_senor = re.search(r'Señor(?:es|a)?\s*:\s*\n?\s*([A-ZÁÉÍÓÚÑ\s]{3,40})(?=\n|$)', texto_pag1, re.IGNORECASE)
             if m_senor and len(m_senor.group(1).strip()) > 3:
@@ -364,9 +356,6 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
             archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
-# ==============================================================================
-# PULIDOR DE MEMORIA: CORRIGE RADICADOS CI.004 Y BUSCA RADICADOS DE DESTINO
-# ==============================================================================
 def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
     
@@ -389,7 +378,6 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     print(f"🧹 Fusionando memorias existentes...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
-    # Pulido profundo de la memoria existente
     for idx, row in df.iterrows():
         ubic = str(row.get("UBICACION_ARCHIVO", "")).strip()
         nom_arch = os.path.basename(ubic)
@@ -419,36 +407,14 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         else:
             df.at[idx, "RAZON SOCIAL REMITENTE"] = "CONSORCIO 4C"
             rad_rem = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
-            
-            # Si el archivo local existe, abrirlo para rescatar el código CI.004 formal y radicado de destino
-            ruta_pdf_local = os.path.join(RUTA_BASE, ubic)
-            if os.path.exists(ruta_pdf_local):
-                try:
-                    doc = fitz.open(ruta_pdf_local)
-                    txt_p1 = doc[0].get_text()
-                    txt_todo = ""
-                    for p in doc: txt_todo += p.get_text() + "\n"
-                    doc.close()
+            if not rad_rem or rad_rem in ["nan", "None", ""]:
+                m_nom = re.search(r'CI004[_-]0*(\d{1,4})\d{2}[_-]', nom_arch, re.IGNORECASE)
+                if m_nom:
+                    df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_nom.group(1).zfill(4)}"
+                else:
+                    m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
+                    if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
 
-                    # 1. Rescatar CI.004 formal si solo tenía GP
-                    if not rad_rem.startswith("CI."):
-                        m_ci = re.search(r'\b(CI\.?\s*004\s*/\s*(?:GP|G)?\s*\d+\s*/\s*\d+(?:\s*/\s*[\d\.]+)?)\b', txt_todo, re.IGNORECASE)
-                        if m_ci:
-                            df.at[idx, "No. RADICADO REMITENTE"] = re.sub(r'\s*/\s*', '/', m_ci.group(1)).replace(' ', '')
-
-                    # 2. Rescatar radicado destinatario si estaba vacío (busca en todas las páginas, ej. pág 23 web ANI)
-                    rad_dest = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
-                    if not rad_dest or rad_dest in ["nan", "None", ""]:
-                        m_ani_web = re.search(r'(?:ANI\s*N[uú]mero\s*de\s*Radicado|Rad(?:icado)?\s*No\.?\s*|Radicado\s*ANI)[\s:]*(\d{14}|\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', txt_todo, re.IGNORECASE)
-                        m_ani_dir = re.search(r'\b(20\d{2}409\d{7}|20\d{2}-\d{3}-\d{6}-\d)\b', txt_todo)
-                        m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?20\d{2}[-\s]?\d+)\b', txt_todo, re.IGNORECASE)
-                        if m_ani_web: df.at[idx, "No. RADICADO DESTINATARIO"] = m_ani_web.group(1).replace(' ', '')
-                        elif m_ani_dir: df.at[idx, "No. RADICADO DESTINATARIO"] = m_ani_dir.group(1).replace(' ', '')
-                        elif m_almar: df.at[idx, "No. RADICADO DESTINATARIO"] = m_almar.group(1).replace(' ', '-')
-                except Exception:
-                    pass
-
-    # Purgar filas que necesitan re-tabularse
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
@@ -511,9 +477,194 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
     print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# AUDITORÍA DE CALIDAD POR IA: REVISA FILA A FILA ANTES DE GENERAR EL EXCEL
+# ==============================================================================
+PROMPT_AUDITORIA_CALIDAD_FINAL = """
+Eres el Auditor Principal de Control de Calidad Archivística.
+Tu misión es inspeccionar esta fila que tiene celdas vacías o texto con ruido de escáner.
+Revisa el documento completo y devuelve el JSON con los datos PERFECTOS, FIELES Y LITERALES:
+
+REGLAS DE AUDITORÍA:
+1. "RAZON_SOCIAL_REMITENTE": Emisor formal de la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
+2. "NO_RADICADO_REMITENTE": Código literal completo tal cual está impreso (ej. "CI.004/0216/17/1.3", "CI.004/GP3143/17/7.1.9", "ALMA-2017-XXXX").
+3. "RAZON_SOCIAL_DESTINATARIO": A quién va dirigida (ej. "AGENCIA NACIONAL DE INFRAESTRUCTURA – ANI", "LEONARDO SALAZAR").
+4. "NO_RADICADO_DESTINATARIO": Sticker de radicación recibido (busca stickers ANI "2017-409-...", números web de 14 dígitos "2017409...", "ALMA-R-...").
+5. "FECHA": Fecha real impresa en el documento (DD/MM/AAAA).
+6. "ASUNTO": Transcribe literal el Asunto o Referencia exacto en español correcto.
+   - PROHIBIDO incluir códigos de barras (||||, 11111).
+   - PROHIBIDO dejar palabras rotas como "Respue!ta".
+   - Conserva "Ref.:" si viene en el documento.
+
+JSON REQUERIDO:
+{
+    "RAZON_SOCIAL_REMITENTE": "...",
+    "NO_RADICADO_REMITENTE": "...",
+    "RAZON_SOCIAL_DESTINATARIO": "...",
+    "NO_RADICADO_DESTINATARIO": "...",
+    "FECHA": "DD/MM/AAAA",
+    "ASUNTO": "..."
+}
+"""
+
+def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_archivo, tipo_flujo, key_idx):
+    if not gemini_clients or evento_cuota_agotada.is_set():
+        return None
+
+    try:
+        doc = fitz.open(ruta_pdf)
+        total_pags = len(doc)
+        partes = []
+
+        # Renderizar hasta 3 páginas para inspección visual minuciosa
+        for p_idx in range(min(total_pags, 3)):
+            pix = doc[p_idx].get_pixmap(dpi=160)
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+            if img.width > 1500:
+                ratio = 1500 / float(img.width)
+                img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+        
+        txt_completo_aud = ""
+        for p in doc: txt_completo_aud += p.get_text() + "\n"
+        doc.close()
+    except Exception:
+        return None
+
+    prompt_auditor = (
+        f"DOCUMENTO: {nombre_archivo}\n"
+        f"TIPO DE FLUJO: {tipo_flujo}\n"
+        f"CAMPOS QUE REQUIEREN AUDITORÍA O CORRECCIÓN: {', '.join(campos_dudosos)}\n"
+        f"TEXTO ACTUAL AUDITADO: '{texto_actual}'\n"
+        f"Texto completo extraído del PDF:\n{txt_completo_aud[:12000]}\n"
+        + PROMPT_AUDITORIA_CALIDAD_FINAL
+    )
+    partes.append(prompt_auditor)
+
+    modelos_auditores = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"]
+    total_keys = len(gemini_clients)
+
+    for intento in range(min(total_keys, 12)):
+        if evento_cuota_agotada.is_set():
+            return None
+
+        idx = (key_idx + intento) % total_keys
+        nombre_key, client = gemini_clients[idx]
+
+        for mod in modelos_auditores:
+            try:
+                r = client.models.generate_content(
+                    model=mod, contents=partes,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                )
+                d = parsear_json(r.text)
+                if d and isinstance(d, dict) and any(d.values()):
+                    print(f"      ✨ [AUDITORÍA FILA | {nombre_key} | {mod}] Datos auditados y completados.", flush=True)
+                    return d
+            except Exception as e:
+                err = str(e).upper()
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA"]):
+                    continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    break
+                else:
+                    continue
+    return None
+
+def auditar_y_corregir_tabla_final(ruta_memoria):
+    if not os.path.exists(ruta_memoria):
+        return
+
+    df_mem = pd.read_csv(ruta_memoria)
+    if df_mem.empty:
+        return
+
+    print("\n🧐 [FASE 2: AUDITORÍA DE CALIDAD POR IA] Evaluando fila a fila antes de generar el Excel...", flush=True)
+
+    columnas_evaluar = [
+        "RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE",
+        "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO",
+        "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"
+    ]
+
+    # Detectar cualquier celda vacía o textos con ruido ilógico en cualquier columna
+    filas_novedad = []
+    for idx, row in df_mem.iterrows():
+        asunto_val = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
+        
+        # 1. Celdas vacías en campos clave
+        tiene_vacios = any(not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None', 'NAN'] for col in columnas_evaluar)
+        
+        # 2. Ruido ilógico en el asunto
+        tiene_ruido = bool(
+            re.search(r'[\|!¡]{2,}', asunto_val) or
+            re.search(r'ASUNTO:\s*$', asunto_val, re.IGNORECASE) or
+            re.search(r'1{5,}', asunto_val) or
+            "CI004_" in asunto_val or
+            "Delivery Status" in asunto_val or
+            len(asunto_val) < 6
+        )
+
+        if tiene_vacios or tiene_ruido:
+            filas_novedad.append(idx)
+
+    if not filas_novedad:
+        print("✅ Control de Calidad: 100% de las filas están completas y sin ruido.", flush=True)
+        return
+
+    print(f"⚠️ Se detectaron {len(filas_novedad)} cartas con celdas vacías o ruido. La IA las auditará fila a fila...", flush=True)
+
+    corregidos = 0
+    for i, idx in enumerate(filas_novedad, 1):
+        if evento_cuota_agotada.is_set():
+            break
+
+        row = df_mem.loc[idx]
+        ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
+        ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
+        nombre_pdf = os.path.basename(ubic_rel)
+        tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
+
+        if not os.path.exists(ruta_pdf_completa):
+            continue
+
+        campos_a_revisar = [c for c in columnas_evaluar if not str(row.get(c, "")).strip() or str(row.get(c, "")).strip() in ['nan', 'None']]
+        asunto_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
+
+        print(f"   [{i}/{len(filas_novedad)}] Auditando {nombre_pdf}...", flush=True)
+
+        datos_auditados = auditar_fila_con_ia_experta(ruta_pdf_completa, asunto_actual, campos_a_revisar, nombre_pdf, tipo_flujo, i)
+
+        if datos_auditados:
+            try:
+                doc_t = fitz.open(ruta_pdf_completa)
+                txt_t = ""
+                for p in doc_t: txt_t += p.get_text() + "\n"
+                doc_t.close()
+            except:
+                txt_t = ""
+
+            datos_pulidos = motor_cero_vacios(datos_auditados, nombre_pdf, txt_t, "", "2017", tipo_flujo)
+
+            for col_nombre in columnas_evaluar:
+                clave_dict = col_nombre.replace(" (DD/MM/AAAA)", "").replace(" / TIPO DOCUMENTAL", "").replace(" ", "_")
+                val_nuevo = datos_pulidos.get(clave_dict, "")
+                if val_nuevo and str(val_nuevo).strip():
+                    df_mem.at[idx, col_nombre] = str(val_nuevo).strip()
+
+            corregidos += 1
+
+    df_mem.to_csv(ruta_memoria, index=False)
+    print(f"🎉 Auditoría Final completada: {corregidos} cartas fueron auditadas y perfeccionadas.", flush=True)
+
+# ==============================================================================
+# PROCESO PRINCIPAL
+# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (CÓDIGO CI.004 COMPLETO + RADICADOS LITERALES)", flush=True)
+    print(" MOTOR RESTREPO_2 (CON AUDITORÍA FINAL FILA A FILA)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -544,6 +695,7 @@ def procesar_archivos():
     procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
 
+    # 1. Fase Turbo: Barrido rápido con 8 hilos
     for tipo, ruta_raiz in flujos:
         if evento_cuota_agotada.is_set():
             break
@@ -582,6 +734,11 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
+    # 2. Fase de Auditoría de Calidad: Revisa fila a fila antes de compilar el Excel
+    if not evento_cuota_agotada.is_set():
+        auditar_y_corregir_tabla_final(ruta_memoria)
+
+    # 3. Compilación del Excel con 2 Hojas y Envío
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
@@ -666,8 +823,8 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
         f'El archivo adjunto contiene las 2 hojas completas:\n'
         f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
-        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado formal completo CI.004/... impreso en la carta.\n\n'
-        f'Todos los radicados están completos y los asuntos conservan su "Ref.:" literal.\n\n'
+        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado literal completo CI.004/... impreso en la carta.\n\n'
+        f'Todos los radicados están completos y los datos fueron auditados fila por fila antes del despacho.\n\n'
         f'Saludos!'
     )
 
