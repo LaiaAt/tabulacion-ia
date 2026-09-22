@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica con Ajuste CI y Destinatarios
+      - name: Descarga Quirúrgica Reparadora (Incluye todas las Enviadas)
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -102,10 +102,7 @@ jobs:
                   rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
                   es_radicada = ~df['UBICACION_ARCHIVO'].str.contains('Recibidas', case=False, na=False)
 
-                  # Identificar filas que necesitan descarga para corregir:
-                  # 1. En Radicadas: si solo tiene GP-XXXX y no el código CI.004/...
-                  # 2. En Radicadas: si falta el radicado destinatario (ej. sticker ANI de página 23)
-                  # 3. Asuntos corruptos o celdas vacías
+                  # MARCAR COMO DEFECTUOSA CUALQUIER FILA CON CI004_ EN EL ASUNTO
                   malos = (
                       df.astype(str).apply(lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)).any(axis=1) |
                       asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
@@ -119,8 +116,8 @@ jobs:
                   df_bueno = df[~malos]
                   df_bueno.to_csv(archivo_unificado, index=False)
 
-                  print(f'✅ Cartas 100% verificadas conservadas: {len(df_bueno)}')
-                  print(f'🎯 Cartas a descargar para extraer código CI o radicado ANI: {malos.sum()}')
+                  print(f'✅ Cartas con datos 100% reales conservadas: {len(df_bueno)}')
+                  print(f'🎯 Cartas con CI004_ o incompletas que serán re-descargadas y tabuladas: {malos.sum()}')
 
                   for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                       buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
@@ -140,7 +137,7 @@ jobs:
               descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
 
           print(f'\n🚀 DESCARGA QUIRÚRGICA:')
-          print(f'   - Enviadas/Radicadas a descargar: {len(descargar_env)}')
+          print(f'   - Enviadas/Radicadas a descargar (todas las que faltaban): {len(descargar_env)}')
           print(f'   - Recibidas a descargar: {len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
