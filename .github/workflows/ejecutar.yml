@@ -60,7 +60,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Reparadora
+      - name: Descarga Quirúrgica con Ajuste CI y Destinatarios
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -97,25 +97,30 @@ jobs:
               if dfs:
                   df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
 
-                  # Purgar filas con textos basura, notificaciones de correo o texto corrupto
                   asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
-                  
+                  rad_rem_str = df['No. RADICADO REMITENTE'].fillna('').astype(str)
+                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
+                  es_radicada = ~df['UBICACION_ARCHIVO'].str.contains('Recibidas', case=False, na=False)
+
+                  # Identificar filas que necesitan descarga para corregir:
+                  # 1. En Radicadas: si solo tiene GP-XXXX y no el código CI.004/...
+                  # 2. En Radicadas: si falta el radicado destinatario (ej. sticker ANI de página 23)
+                  # 3. Asuntos corruptos o celdas vacías
                   malos = (
                       df.astype(str).apply(lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)).any(axis=1) |
                       asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
                       asunto_str.str.contains('CI004_', case=False, na=False) |
-                      asunto_str.str.contains('Delivery Status|mailbox unavailable|Diagnostic-Code|Reflector Flasher', case=False, na=False) |
-                      (asunto_str.str.len() > 350) |
+                      asunto_str.str.contains('Delivery Status|mailbox unavailable', case=False, na=False) |
                       df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-                      df['No. RADICADO REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-                      df['No. RADICADO DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                      (es_radicada & ~rad_rem_str.str.contains('CI\.?004', regex=True, case=False)) |
+                      (es_radicada & rad_dest_str.str.strip().isin(['', 'nan', 'None']))
                   )
 
                   df_bueno = df[~malos]
                   df_bueno.to_csv(archivo_unificado, index=False)
 
-                  print(f'✅ Conservando {len(df_bueno)} cartas buenas.')
-                  print(f'🎯 Detectadas {malos.sum()} cartas con asuntos basura o incompletos para re-tabular.')
+                  print(f'✅ Cartas 100% verificadas conservadas: {len(df_bueno)}')
+                  print(f'🎯 Cartas a descargar para extraer código CI o radicado ANI: {malos.sum()}')
 
                   for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
                       buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
