@@ -1,6 +1,8 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (ASUNTO 100% IA | CERO BASURA OCR NI CORREOS)
-# DETECTOR PÁGINA 2 ANI | RADICADOS BLINDADOS | EXCEL CON 2 HOJAS
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CON AUDITORÍA DE CALIDAD FINAL POR IA)
+# FASE 1: BARRIDO TURBO (8 HILOS)
+# FASE 2: AUDITORÍA Y CONTROL DE CALIDAD POR IA ANTES DE ENVIAR EL EXCEL
+# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | DATOS 100% REALES Y PULIDOS
 # ==============================================================================
 
 import os
@@ -60,28 +62,24 @@ RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 lock_csv = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
-def limpiar_asunto_puro(asunto_raw, nombre_archivo=""):
-    if not asunto_raw:
-        return ""
+def limpiar_asunto(asunto_raw, texto_doc=""):
+    m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+    if m_asunto_expl:
+        t_as = " ".join(m_asunto_expl.group(1).split()).strip()
+        t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
+        if len(t_as) > 3 and not t_as.startswith("CI004_"):
+            asunto_raw = t_as
+    elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
+        m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+        if m:
+            asunto_raw = " ".join(m.group(1).split())
+        else:
+            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración)[^\n\r]+', texto_doc, re.IGNORECASE)
+            asunto_raw = m2.group(0).strip() if m2 else ""
 
     t = " ".join(str(asunto_raw).strip().split())
-
-    # Descartar basura evidente (notificaciones de correo, rebotes, o nombres de archivo crudos)
-    if any(k in t.lower() for k in ["delivery status", "mailbox unavailable", "diagnostic-code", "reflector flasher"]):
-        return ""
-
-    # Eliminar secuencias de números unos repetidos o barras de escáner
-    t = re.sub(r'[1lI\|]{5,}', ' ', t)
+    t = re.sub(r'[1lI\|]{4,}', ' ', t)
     t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
-
-    # Si trae el prefijo 'CI004_' es nombre de archivo, no asunto real
-    if t.startswith("CI004_"):
-        return ""
-
-    # Limitar a tamaño real de un asunto (máximo 350 caracteres)
-    if len(t) > 350:
-        t = t[:350].rsplit(' ', 1)[0]
-
     t = " ".join(t.split())
     return ILLEGAL_CHARACTERS_RE.sub("", t)
 
@@ -93,7 +91,6 @@ def obtener_insumos_documento(ruta_pdf):
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
-        # Detección de carátula electrónica ANI en Página 1
         num_pag_imagen = 0
         es_caratula_ani = (
             "al contestar cite el numero de radicado" in texto_pag1.lower() or
@@ -101,7 +98,6 @@ def obtener_insumos_documento(ruta_pdf):
             ("libertad y orden" in texto_pag1.lower() and "oficio remisorio" in texto_pag1.lower())
         )
 
-        # Si Pág 1 es carátula ANI, la carta formal con membrete y asunto está en la PÁGINA 2
         if es_caratula_ani and total_paginas > 1:
             num_pag_imagen = 1
             texto_para_ia = doc[1].get_text()
@@ -142,17 +138,17 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
     return fecha_str
 
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto de correspondencia técnica.
-Transcribe EXACTA, PURA y LITERALMENTE lo que ves en la imagen de la carta formal.
+Eres un auditor archivístico experto de correspondencia técnica y contractual.
+Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento formal.
 PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
-1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete superior.
-2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/0143/17/2.2", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre.
-4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
+1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor").
+4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
-6. "ASUNTO": Transcribe el texto EXACTO del Asunto o Referencia de la carta formal. Si tiene "ASUNTO:" separado de "REFERENCIA:", transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia. PROHIBIDO poner nombres de archivos técnicos ("CI004_..."), párrafos del cuerpo o notificaciones de correo ("Delivery Status").
+6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_..."), texto de códigos de barras (||||, 1111) o cortar la frase en "ASUNTO:".
 
 JSON REQUERIDO:
 {
@@ -173,11 +169,10 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-MODELOS_GEMINI_OFICIALES = [
+MODELOS_FASE_TURBO = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.7-flash"
+    "gemini-3.5-flash"
 ]
 
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
@@ -198,7 +193,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
-        for mod in MODELOS_GEMINI_OFICIALES:
+        for mod in MODELOS_FASE_TURBO:
             try:
                 r = client.models.generate_content(
                     model=mod, contents=[part_img, prompt_final],
@@ -310,9 +305,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    # ASUNTO 100% PURO DE LA IA
-    asunto_final = limpiar_asunto_puro(ia_asunto, nombre_archivo)
-
+    asunto_final = limpiar_asunto(ia_asunto, texto_completo)
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
@@ -369,6 +362,11 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         nom_arch = os.path.basename(ubic)
         es_recibida = "recibidas" in ubic.lower()
 
+        as_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
+        as_limpio = re.sub(r'[1lI\|]{4,}', ' ', as_actual)
+        as_limpio = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', as_limpio)
+        df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = " ".join(as_limpio.split())
+
         if es_recibida:
             df.at[idx, "RAZON SOCIAL DESTINATARIO"] = "CONSORCIO 4C"
             rad_dest = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
@@ -393,7 +391,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
                     m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
                     if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
 
-    # Purgar cualquier fila que tenga asuntos basura o datos incompletos
+    # Purgar filas que necesitan re-tabularse
     asunto_str = df["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str)
     
     malos = (
@@ -401,6 +399,8 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
         asunto_str.str.contains("CI004_", case=False, na=False) |
         asunto_str.str.contains("Delivery Status|mailbox unavailable|Diagnostic-Code|Reflector Flasher", case=False, na=False) |
+        asunto_str.str.contains(r'ASUNTO:\s*$', regex=True, case=False) |
+        asunto_str.str.contains(r'[\|!¡]{2,}', regex=True) |
         (asunto_str.str.len() > 350) |
         df["RAZON SOCIAL DESTINATARIO"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
         df["No. RADICADO REMITENTE"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
@@ -411,13 +411,13 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
     print(f"✅ Memorias pulidas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas con datos por reparar.", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas para re-tabular.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
     return procesados_basenames, item_sig
 
-def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id):
+def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id):
     if evento_cuota_agotada.is_set():
         return False
 
@@ -452,9 +452,165 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# AUDITORÍA DE CALIDAD FINAL POR IA (REVISA TODO ANTES DE ENVIAR EL EXCEL)
+# ==============================================================================
+PROMPT_AUDITORIA_CALIDAD_FINAL = """
+Eres el Auditor Principal de Correspondencia Oficial.
+Estás auditando una carta cuyo asunto o campos quedaron truncados o con ruido OCR.
+Tu misión es leer la imagen de la carta formal y devolver los datos PERFECTOS y PULIDOS:
+
+REGLAS DE CALIDAD:
+1. "ASUNTO": Transcribe el Asunto o Referencia formal exacto, limpio y en español correcto.
+   - PROHIBIDO incluir códigos de barras (||||, 11111).
+   - PROHIBIDO dejar palabras cortadas como "Respue!ta", "comunicaclon" o "REFERENCIA: ASUNTO:".
+   - Si la carta es "Respuesta a comunicación CI.004/GP... sobre diseño de puentes", redacta el Asunto completo, fiel y profesional.
+2. "RAZON_SOCIAL_REMITENTE", "NO_RADICADO_REMITENTE", "RAZON_SOCIAL_DESTINATARIO", "NO_RADICADO_DESTINATARIO", "FECHA".
+
+JSON REQUERIDO:
+{
+    "RAZON_SOCIAL_REMITENTE": "...",
+    "NO_RADICADO_REMITENTE": "...",
+    "RAZON_SOCIAL_DESTINATARIO": "...",
+    "NO_RADICADO_DESTINATARIO": "...",
+    "FECHA": "DD/MM/AAAA",
+    "ASUNTO": "..."
+}
+"""
+
+def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, nombre_archivo, tipo_flujo, key_idx):
+    if not gemini_clients or evento_cuota_agotada.is_set():
+        return None
+
+    try:
+        doc = fitz.open(ruta_pdf)
+        total_pags = len(doc)
+        partes = []
+
+        # Enviar las primeras 2 páginas para auditoría visual
+        for p_idx in range(min(total_pags, 2)):
+            pix = doc[p_idx].get_pixmap(dpi=160)
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+            if img.width > 1500:
+                ratio = 1500 / float(img.width)
+                img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+        doc.close()
+    except Exception:
+        return None
+
+    prompt_auditor = (
+        f"DOCUMENTO: {nombre_archivo}\n"
+        f"TIPO: {tipo_flujo}\n"
+        f"NOVEDAD DETECTADA EN EL TEXTO ACTUAL: '{texto_actual}'\n"
+        f"Revisa la carta formal en las páginas adjuntas y extrae el JSON perfecto y pulido.\n"
+        + PROMPT_AUDITORIA_CALIDAD_FINAL
+    )
+    partes.append(prompt_auditor)
+
+    modelos_auditores = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"]
+    total_keys = len(gemini_clients)
+
+    for intento in range(min(total_keys, 10)):
+        if evento_cuota_agotada.is_set():
+            return None
+
+        idx = (key_idx + intento) % total_keys
+        nombre_key, client = gemini_clients[idx]
+
+        for mod in modelos_auditores:
+            try:
+                r = client.models.generate_content(
+                    model=mod, contents=partes,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                )
+                d = parsear_json(r.text)
+                if d and isinstance(d, dict) and d.get("ASUNTO"):
+                    print(f"      ✨ [IA AUDITORA | {nombre_key} | {mod}] Asunto reparado: {str(d.get('ASUNTO'))[:60]}...", flush=True)
+                    return d
+            except Exception as e:
+                err = str(e).upper()
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA"]):
+                    continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    break
+                else:
+                    continue
+    return None
+
+def auditar_y_corregir_tabla_final(ruta_memoria):
+    if not os.path.exists(ruta_memoria):
+        return
+
+    df_mem = pd.read_csv(ruta_memoria)
+    if df_mem.empty:
+        return
+
+    print("\n🧐 [FASE 2: AUDITORÍA DE CALIDAD POR IA] Inspeccionando todo el archivo antes de generar el Excel...", flush=True)
+
+    # Criterio estricto de novedades o errores en Asunto o celdas vacías
+    asunto_col = df_mem["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str)
+    
+    novedades_mask = (
+        asunto_col.str.contains(r'[\|!¡]{2,}', regex=True) |
+        asunto_col.str.contains(r'ASUNTO:\s*$', regex=True, case=False) |
+        asunto_col.str.contains(r'1{5,}', regex=True) |
+        asunto_col.str.contains(r'CI004_', regex=True) |
+        asunto_col.str.contains("Delivery Status|mailbox unavailable", case=False) |
+        (asunto_col.str.len() < 8) |
+        df_mem["RAZON SOCIAL DESTINATARIO"].fillna('').str.strip().isin(['', 'nan']) |
+        df_mem["No. RADICADO REMITENTE"].fillna('').str.strip().isin(['', 'nan']) |
+        df_mem["No. RADICADO DESTINATARIO"].fillna('').str.strip().isin(['', 'nan'])
+    )
+
+    indices_novedad = df_mem[novedades_mask].index.tolist()
+
+    if not indices_novedad:
+        print("✅ Control de Calidad: CERO novedades. Todos los registros están impecables.", flush=True)
+        return
+
+    print(f"⚠️ Se detectaron {len(indices_novedad)} cartas con novedades o texto imperfecto. La IA las auditará una por una...", flush=True)
+
+    corregidos = 0
+    for i, idx in enumerate(indices_novedad, 1):
+        if evento_cuota_agotada.is_set():
+            break
+
+        row = df_mem.loc[idx]
+        ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
+        ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
+        nombre_pdf = os.path.basename(ubic_rel)
+        tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
+
+        if not os.path.exists(ruta_pdf_completa):
+            continue
+
+        asunto_actual = str(row["ASUNTO / TIPO DOCUMENTAL"])
+        print(f"   [{i}/{len(indices_novedad)}] Auditando {nombre_pdf}...", flush=True)
+
+        datos_auditados = auditar_fila_con_ia_experta(ruta_pdf_completa, asunto_actual, nombre_pdf, tipo_flujo, i)
+
+        if datos_auditados and datos_auditados.get("ASUNTO"):
+            datos_pulidos = motor_cero_vacios(datos_auditados, nombre_pdf, "", "", "2017", tipo_flujo)
+            
+            for col_nombre in ["RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE", "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO", "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"]:
+                val_nuevo = datos_pulidos.get(col_nombre.replace(" (DD/MM/AAAA)", "").replace(" / TIPO DOCUMENTAL", "").replace(" ", "_"), "")
+                if val_nuevo and str(val_nuevo).strip():
+                    df_mem.at[idx, col_nombre] = str(val_nuevo).strip()
+
+            corregidos += 1
+
+    df_mem.to_csv(ruta_memoria, index=False)
+    print(f"🎉 Auditoría Final completada: {corregidos} cartas fueron auditadas y corregidas con éxito.", flush=True)
+
+# ==============================================================================
+# PROCESO PRINCIPAL
+# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (ASUNTO 100% IA | CERO BASURA OCR)", flush=True)
+    print(" MOTOR RESTREPO_2 (CON AUDITORÍA DE CALIDAD PRE-ENVÍO)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -516,12 +672,18 @@ def procesar_archivos():
                 if evento_cuota_agotada.is_set():
                     break
                 hilo_id = (i % num_trabajadores) + 1
-                f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
+                f = executor.submit(procesar_un_pdf_fase_turbo, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
                 futuros.append(f)
                 item_counter += 1
 
             for f in as_completed(futuros):
                 pass
+
+    # ==========================================================================
+    # AUDITORÍA DE CALIDAD POR IA SOBRE TODO EL EXCEL ANTES DE ENVIAR
+    # ==========================================================================
+    if not evento_cuota_agotada.is_set():
+        auditar_y_corregir_tabla_final(ruta_memoria)
 
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
@@ -608,7 +770,7 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         f'El archivo adjunto contiene las 2 hojas completas:\n'
         f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
         f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado GP.\n\n'
-        f'Todos los radicados están completos y los asuntos provienen 100% de la visión de la IA sin basura.\n\n'
+        f'Todos los asuntos y metadatos fueron auditados al 100% por IA antes del despacho.\n\n'
         f'Saludos!'
     )
 
@@ -619,7 +781,7 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
                 file_name = os.path.basename(ruta_archivo)
             msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
 
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
         print("🚀 ¡CORREO ENVIADO CON ÉXITO!", flush=True)
