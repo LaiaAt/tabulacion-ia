@@ -1,7 +1,7 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (ASUNTO 100% FORMAL | CERO CÓDIGOS CI004_)
-# RECUPERACIÓN LITERAL "Ref. Contrato..." | RADICADO CI.004 COMPLETO
-# EXCEL CON 2 HOJAS (RECIBIDAS Y RADICADAS) | 8 HILOS EN PARALELO | 31 CLAVES
+# SISTEMA DE TABULACIÓN RESTREPO_2 (EXPRIMIDO TOTAL DE MODELOS + COOLDOWN 24H)
+# PRUEBA TODOS LOS MODELOS POR API | SI TODOS FALLAN -> ENFRIAMIENTO 24 HORAS
+# SI TODAS LAS APIS ESTÁN EN 24H -> DETIENE EL PROGRAMA Y ENVÍA ALERTA
 # ==============================================================================
 
 import os
@@ -59,50 +59,47 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
+lock_key = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
+# Diccionario para controlar el enfriamiento de 24 horas por clave
+key_cooldowns = {nombre: 0.0 for nombre, _ in gemini_clients}
+
 # ==============================================================================
-# LIMPIEZA DE ASUNTO FORMAL: PROHIBIDO COPIAR "CI004_" O NOMBRES DE ARCHIVO
+# LISTADO DE TODOS LOS MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
 # ==============================================================================
+MODELOS_FASE_TURBO = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash"
+]
+
+MODELOS_AUDITORES = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash"
+]
+
 def limpiar_asunto(asunto_raw, texto_doc=""):
-    t_raw = str(asunto_raw).strip() if asunto_raw else ""
-
-    # Si la IA copió el nombre de archivo técnico tipo "Asunto: CI004_...", se DESCARTA
-    if "CI004_" in t_raw:
-        t_raw = ""
-
-    # 1. Rescate directo desde el encabezado formal de la carta física (Ref. Contrato...)
-    m_ref_literal = re.search(r'((?:Ref\.?:?|REFERENCIA:?)\s*Contrato\s+de\s+(?:Concesi[oó]n|Interventor[ií]a)[^\n\r]*[\s\S]*?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|$))', texto_doc, re.IGNORECASE)
-    if m_ref_literal:
-        t_ref = " ".join(m_ref_literal.group(1).split()).strip()
-        if len(t_ref) > 15:
-            return ILLEGAL_CHARACTERS_RE.sub("", t_ref)
-
-    # 2. Si no es de contrato pero hay un campo explícito ASUNTO:
-    m_asunto_expl = re.search(r'(\bASUNTO\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+    m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
     if m_asunto_expl:
         t_as = " ".join(m_asunto_expl.group(1).split()).strip()
-        if len(t_as) > 3 and not "CI004_" in t_as:
-            t_raw = t_as
-
-    # 3. Rescate secundario si aún está vacío
-    if not t_raw or t_raw.upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"]:
-        m_sec = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-        if m_sec:
-            t_raw = " ".join(m_sec.group(1).split())
+        t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
+        if len(t_as) > 3 and not t_as.startswith("CI004_"):
+            asunto_raw = t_as
+    elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
+        m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+        if m:
+            asunto_raw = " ".join(m.group(1).split())
         else:
-            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración|Alcance|Terminación|Resolución)[^\n\r]+', texto_doc, re.IGNORECASE)
-            t_raw = m2.group(0).strip() if m2 else ""
+            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración)[^\n\r]+', texto_doc, re.IGNORECASE)
+            asunto_raw = m2.group(0).strip() if m2 else ""
 
-    t = " ".join(t_raw.split())
-
-    # Asegurar el prefijo "Ref.: " si comienza por Contrato
-    if (t.startswith("Contrato de Concesión") or t.startswith("Contrato de Interventoría")) and not t.upper().startswith("REF"):
-        if re.search(r'Ref\.\s*:', texto_doc, re.IGNORECASE):
-            t = f"Ref.: {t}"
-        elif re.search(r'Ref\.', texto_doc, re.IGNORECASE):
-            t = f"Ref. {t}"
-
+    t = " ".join(str(asunto_raw).strip().split())
     t = re.sub(r'[1lI\|]{4,}', ' ', t)
     t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
     t = " ".join(t.split())
@@ -116,7 +113,6 @@ def obtener_insumos_documento(ruta_pdf):
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
-        # Detección de carátula electrónica ANI en Página 1
         num_pag_imagen = 0
         es_caratula_ani = (
             "al contestar cite el numero de radicado" in texto_pag1.lower() or
@@ -124,7 +120,6 @@ def obtener_insumos_documento(ruta_pdf):
             ("libertad y orden" in texto_pag1.lower() and "oficio remisorio" in texto_pag1.lower())
         )
 
-        # Si Pág 1 es carátula ANI, la carta formal con membrete y asunto está en la PÁGINA 2
         if es_caratula_ani and total_paginas > 1:
             num_pag_imagen = 1
             texto_para_ia = doc[1].get_text()
@@ -164,21 +159,18 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
         return f"{int(m3.group(1)):02d}/{meses_map[m3.group(2)]}/{m3.group(3)}"
     return fecha_str
 
-# ==============================================================================
-# PROMPT SIN EL NOMBRE DEL ARCHIVO PARA QUE LA IA NO LO COPIE
-# ==============================================================================
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto de correspondencia contractual y técnica.
-Transcribe EXACTA, PURA y LITERALMENTE lo que ves en la carta formal adjunta.
-PROHIBIDO inventar datos y PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
+Eres un auditor archivístico experto de correspondencia técnica y contractual.
+Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento formal.
+PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 REGLAS OBLIGATORIAS:
-1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete superior.
-2. "NO_RADICADO_REMITENTE": El radicado oficial literal de quien envía tal cual aparece impreso bajo el logo. OBLIGATORIO transcribir el código CI.004 completo si existe (ejemplo: "CI.004/0216/17/1.3", "CI.004/GP3143/17/7.1.9").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor").
-4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. "20174091041192", "ALMA-R-2017-02101", sello GP).
+1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre de la persona.
+4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
-6. "ASUNTO": Transcribe LITERAL, ÍNTEGRO Y COMPLETO el texto del Asunto o Referencia del encabezado de la carta formal. PROHIBIDO poner códigos de subida o nombres de archivo tipo "CI004_...".
+6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
 JSON REQUERIDO:
 {
@@ -199,22 +191,15 @@ def parsear_json(texto):
         return json.loads(t)
     except: return None
 
-MODELOS_GEMINI_OFICIALES = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash",
-    "gemini-3.1-pro-preview"
-]
-
+# ==============================================================================
+# FASE 1: BARRIDO TURBO (EXPRIME TODOS LOS MODELOS ANTES DE DESCARTAR LA API)
+# ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
     if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None, "", ""
 
-    # NO ENVIAR EL NOMBRE DEL ARCHIVO PARA QUE LA IA NO LO COPIE EN EL ASUNTO
-    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado en la carta:\n{texto_digital[:3500]}"
-    prompt_final = PROMPT_AUDITORIA + apoyo
+    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
+    prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
     part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
     total_keys = len(gemini_clients)
@@ -227,7 +212,15 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
-        for mod in MODELOS_GEMINI_OFICIALES:
+        # Verificar si la API completa está en castigo de 24 horas
+        with lock_key:
+            if key_cooldowns.get(nombre_key, 0) > time.time():
+                continue
+
+        exito_en_algun_modelo = False
+
+        # EXPRIMIR TODOS LOS MODELOS EN ESTA API
+        for mod in MODELOS_FASE_TURBO:
             try:
                 r = client.models.generate_content(
                     model=mod, contents=[part_img, prompt_final],
@@ -239,11 +232,28 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    continue
+                    print(f"      ⚠️ {nombre_key} ({mod}) saturado. Explotando el siguiente modelo...", flush=True)
+                    time.sleep(0.5)
+                    continue  # Continúa al siguiente MODELO en la misma API
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
+                    exito_en_algun_modelo = True # Hack para salir del loop de modelos
                     break
                 else:
                     continue
+
+        if not exito_en_algun_modelo:
+            # Si llegó aquí es porque TODOS los modelos de esta API fallaron. Castigo de 24 horas.
+            with lock_key:
+                print(f"      🔴 {nombre_key} agotó TODOS sus modelos. Aplicando enfriamiento de 24 HORAS.", flush=True)
+                key_cooldowns[nombre_key] = time.time() + 86400  # 86400 segundos = 24 horas
+
+    # Si sale del ciclo for, significa que TODAS las APIs entraron en castigo de 24h
+    with lock_key:
+        now = time.time()
+        if all(c > now for c in key_cooldowns.values()):
+            print("\n🚨 TODAS LAS CLAVES AGOTARON TODOS SUS MODELOS. DETENIENDO EL PROGRAMA. 🚨", flush=True)
+            evento_cuota_agotada.set()
 
     return None, "", ""
 
@@ -308,35 +318,24 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     else:
         ia_rem = "CONSORCIO 4C"
 
-        # 1. RADICADO REMITENTE EN ENVIADAS: CÓDIGO FORMAL CI.004 COMPLETO
-        if not rad_rem or rad_rem.lower().endswith(".pdf") or "ci004_" in rad_rem.lower():
-            m_ci_formal = re.search(r'\b(CI\.?\s*004\s*/\s*(?:GP|G)?\s*\d+\s*/\s*\d+(?:\s*/\s*[\d\.]+)?)\b', texto_completo, re.IGNORECASE)
-            if m_ci_formal:
-                rad_rem = re.sub(r'\s*/\s*', '/', m_ci_formal.group(1)).replace(' ', '')
-            else:
-                m_nom = re.search(r'CI004[_-]0*(\d{1,4})\d{2}[_-]', nombre_archivo, re.IGNORECASE)
-                if m_nom:
-                    rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
-                else:
-                    m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
-                    rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
+        m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
+        if m_nom:
+            rad_rem = f"GP-{m_nom.group(1).zfill(4)}"
+        else:
+            m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
+            rad_rem = f"GP-{m_gp.group(1)}" if m_gp else ""
 
-        # 2. RADICADO DESTINATARIO: BÚSQUEDA MULTI-PÁGINA (INCLUYE PÁG 23 WEB ANI)
         if not rad_dest:
-            m_ani_web = re.search(r'(?:ANI\s*N[uú]mero\s*de\s*Radicado|Rad(?:icado)?\s*No\.?\s*|Radicado\s*ANI)[\s:]*(\d{14}|\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
-            m_ani_directo = re.search(r'\b(20\d{2}409\d{7}|20\d{2}-\d{3}-\d{6}-\d)\b', texto_completo)
+            m_ani_stick = re.search(r'(?:Rad(?:icado)?\s*No\.?\s*|ANI\s*Numero\s*de\s*Radicado\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
             m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?20\d{2}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
             if not m_almar:
                 m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d+)\b', texto_completo, re.IGNORECASE)
 
-            if m_ani_web:
-                rad_dest = m_ani_web.group(1).replace(' ', '')
-            elif m_ani_directo:
-                rad_dest = m_ani_directo.group(1).replace(' ', '')
+            if m_ani_stick:
+                rad_dest = m_ani_stick.group(1).replace(' ', '')
             elif m_almar:
                 rad_dest = m_almar.group(1).replace(' ', '-')
 
-        # 3. DESTINATARIO
         if not ia_dest:
             m_senor = re.search(r'Señor(?:es|a)?\s*:\s*\n?\s*([A-ZÁÉÍÓÚÑ\s]{3,40})(?=\n|$)', texto_pag1, re.IGNORECASE)
             if m_senor and len(m_senor.group(1).strip()) > 3:
@@ -350,9 +349,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    # ASUNTO FORMAL 100% LIMPIO DE NOMBRES DE ARCHIVO
     asunto_final = limpiar_asunto(ia_asunto, texto_completo)
-
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
@@ -409,14 +406,10 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         nom_arch = os.path.basename(ubic)
         es_recibida = "recibidas" in ubic.lower()
 
-        # Limpiar ruido OCR
         as_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
         as_limpio = re.sub(r'[1lI\|]{4,}', ' ', as_actual)
         as_limpio = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', as_limpio)
         df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = " ".join(as_limpio.split())
-
-        if (as_actual.startswith("Contrato de Concesión") or as_actual.startswith("Contrato de Interventoría")) and not as_actual.upper().startswith("REF"):
-            df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = f"Ref.: {as_actual}"
 
         if es_recibida:
             df.at[idx, "RAZON SOCIAL DESTINATARIO"] = "CONSORCIO 4C"
@@ -434,45 +427,24 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
         else:
             df.at[idx, "RAZON SOCIAL REMITENTE"] = "CONSORCIO 4C"
             rad_rem = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
-            
-            ruta_pdf_local = os.path.join(RUTA_BASE, ubic)
-            if os.path.exists(ruta_pdf_local):
-                try:
-                    doc = fitz.open(ruta_pdf_local)
-                    txt_todo = ""
-                    for p in doc: txt_todo += p.get_text() + "\n"
-                    doc.close()
+            if not rad_rem.startswith("GP-") or rad_rem in ["nan", "None", ""]:
+                m_nom = re.search(r'CI004_(\d{4})\d{2}_', nom_arch, re.IGNORECASE)
+                if m_nom:
+                    df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_nom.group(1).zfill(4)}"
+                else:
+                    m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
+                    if m_gp: df.at[idx, "No. RADICADO REMITENTE"] = f"GP-{m_gp.group(1)}"
 
-                    if not rad_rem.startswith("CI."):
-                        m_ci = re.search(r'\b(CI\.?\s*004\s*/\s*(?:GP|G)?\s*\d+\s*/\s*\d+(?:\s*/\s*[\d\.]+)?)\b', txt_todo, re.IGNORECASE)
-                        if m_ci:
-                            df.at[idx, "No. RADICADO REMITENTE"] = re.sub(r'\s*/\s*', '/', m_ci.group(1)).replace(' ', '')
-
-                    rad_dest = str(df.at[idx, "No. RADICADO DESTINATARIO"]).strip()
-                    if not rad_dest or rad_dest in ["nan", "None", ""]:
-                        m_ani_web = re.search(r'(?:ANI\s*N[uú]mero\s*de\s*Radicado|Rad(?:icado)?\s*No\.?\s*|Radicado\s*ANI)[\s:]*(\d{14}|\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', txt_todo, re.IGNORECASE)
-                        m_ani_dir = re.search(r'\b(20\d{2}409\d{7}|20\d{2}-\d{3}-\d{6}-\d)\b', txt_todo)
-                        m_almar = re.search(r'\b(ALMA[-\s]?R[-\s]?20\d{2}[-\s]?\d+)\b', txt_todo, re.IGNORECASE)
-                        if m_ani_web: df.at[idx, "No. RADICADO DESTINATARIO"] = m_ani_web.group(1).replace(' ', '')
-                        elif m_ani_dir: df.at[idx, "No. RADICADO DESTINATARIO"] = m_ani_dir.group(1).replace(' ', '')
-                        elif m_almar: df.at[idx, "No. RADICADO DESTINATARIO"] = m_almar.group(1).replace(' ', '-')
-                except Exception:
-                    pass
-
-    # PURGAR CUALQUIER FILA QUE CONTENGA CI004_ EN EL ASUNTO O DATOS INCOMPLETOS
-    asunto_str = df["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str)
-    
     tiene_constatado = df.astype(str).apply(
         lambda col: col.str.contains("CONSTATADO|SIN RADICADO", case=False, na=False)
     ).any(axis=1)
 
     asunto_invalido = (
-        asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-        asunto_str.str.contains("CI004_", case=False, na=False)
+        df["ASUNTO / TIPO DOCUMENTAL"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
+        df["ASUNTO / TIPO DOCUMENTAL"].astype(str).str.contains("CI004_", case=False, na=False)
     )
 
     dest_vacio = df["RAZON SOCIAL DESTINATARIO"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
-    
     rad_vacio = (
         df["No. RADICADO REMITENTE"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
         df["No. RADICADO DESTINATARIO"].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
@@ -483,7 +455,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     df_limpio.to_csv(ruta_memoria_final, index=False)
 
     print(f"✅ Memorias pulidas: {len(df_limpio)} cartas buenas conservadas.", flush=True)
-    print(f"🎯 Detectadas {malos.sum()} cartas con datos por re-tabular (incluye las de CI004_ en asunto).", flush=True)
+    print(f"🎯 Detectadas {malos.sum()} cartas con datos incompletos a re-tabular.", flush=True)
 
     procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_limpio["UBICACION_ARCHIVO"].dropna())
     item_sig = len(df_limpio) + 1
@@ -499,8 +471,8 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
-    if datos is None:
-        print(f"⏸️ [Hilo-{hilo_id}] {pdf} | Pausado por cuota temporal.", flush=True)
+    if datos is None and not evento_cuota_agotada.is_set():
+        # Si todos los modelos rápidos fallaron, no lo guardamos en esta fase, la Fase 2 lo atrapará
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -524,9 +496,183 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
     print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
+# ==============================================================================
+# FASE 2: AUDITORÍA DE CALIDAD FINAL POR IA (MODELOS EXPERTOS)
+# ==============================================================================
+PROMPT_AUDITORIA_CALIDAD_FINAL = """
+Eres el Auditor Principal de Control de Calidad Archivística.
+Tu misión es inspeccionar esta fila que tiene celdas vacías o texto con ruido de escáner.
+Revisa el documento completo y devuelve el JSON con los datos PERFECTOS, FIELES Y LITERALES.
+
+JSON REQUERIDO:
+{
+    "RAZON_SOCIAL_REMITENTE": "...",
+    "NO_RADICADO_REMITENTE": "...",
+    "RAZON_SOCIAL_DESTINATARIO": "...",
+    "NO_RADICADO_DESTINATARIO": "...",
+    "FECHA": "DD/MM/AAAA",
+    "ASUNTO": "..."
+}
+"""
+
+def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_archivo, tipo_flujo, key_idx):
+    if not gemini_clients or evento_cuota_agotada.is_set():
+        return None
+
+    try:
+        doc = fitz.open(ruta_pdf)
+        total_pags = len(doc)
+        partes = []
+
+        for p_idx in range(min(total_pags, 2)):
+            pix = doc[p_idx].get_pixmap(dpi=160)
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+            if img.width > 1500:
+                ratio = 1500 / float(img.width)
+                img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+        
+        doc.close()
+    except Exception:
+        return None
+
+    prompt_auditor = (
+        f"DOCUMENTO: {nombre_archivo}\n"
+        f"CAMPOS QUE REQUIEREN AUDITORÍA: {', '.join(campos_dudosos)}\n"
+        f"TEXTO ACTUAL AUDITADO: '{texto_actual}'\n"
+        + PROMPT_AUDITORIA_CALIDAD_FINAL
+    )
+    partes.append(prompt_auditor)
+
+    total_keys = len(gemini_clients)
+
+    for intento in range(total_keys):
+        if evento_cuota_agotada.is_set():
+            return None
+
+        idx = (key_idx + intento) % total_keys
+        nombre_key, client = gemini_clients[idx]
+
+        with lock_key:
+            if key_cooldowns.get(nombre_key, 0) > time.time():
+                continue
+
+        for mod in MODELOS_AUDITORES:
+            try:
+                r = client.models.generate_content(
+                    model=mod, contents=partes,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                )
+                d = parsear_json(r.text)
+                if d and isinstance(d, dict) and any(d.values()):
+                    print(f"      ✨ [AUDITORÍA FILA | {nombre_key} | {mod}] Datos corregidos y completados.", flush=True)
+                    return d
+            except Exception as e:
+                err = str(e).upper()
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA"]):
+                    print(f"      🔴 {nombre_key} ({mod}) sin cuota. Probando siguiente...", flush=True)
+                    time.sleep(0.5)
+                    continue
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    break
+                else:
+                    continue
+
+        with lock_key:
+            key_cooldowns[nombre_key] = time.time() + 86400
+
+    return None
+
+def auditar_y_corregir_tabla_final(ruta_memoria):
+    if not os.path.exists(ruta_memoria):
+        return
+
+    df_mem = pd.read_csv(ruta_memoria)
+    if df_mem.empty:
+        return
+
+    print("\n🧐 [FASE 2: AUDITORÍA DE CALIDAD] Evaluando celdas vacías o ruido...", flush=True)
+
+    columnas_evaluar = [
+        "RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE",
+        "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO",
+        "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"
+    ]
+
+    filas_novedad = []
+    for idx, row in df_mem.iterrows():
+        asunto_val = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
+        tiene_vacios = any(not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None', 'NAN'] for col in columnas_evaluar)
+        
+        tiene_ruido = bool(
+            re.search(r'[\|!¡]{2,}', asunto_val) or
+            re.search(r'ASUNTO:\s*$', asunto_val, re.IGNORECASE) or
+            re.search(r'1{5,}', asunto_val) or
+            "CI004_" in asunto_val or
+            "Delivery Status" in asunto_val or
+            len(asunto_val) < 6
+        )
+
+        if tiene_vacios or tiene_ruido:
+            filas_novedad.append(idx)
+
+    if not filas_novedad:
+        print("✅ Control de Calidad: 100% de las filas están limpias.", flush=True)
+        return
+
+    print(f"⚠️ Detectadas {len(filas_novedad)} cartas con vacíos o ruido. Iniciando IA Auditora...", flush=True)
+
+    corregidos = 0
+    for i, idx in enumerate(filas_novedad, 1):
+        if evento_cuota_agotada.is_set():
+            break
+
+        row = df_mem.loc[idx]
+        ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
+        ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
+        nombre_pdf = os.path.basename(ubic_rel)
+        tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
+
+        if not os.path.exists(ruta_pdf_completa):
+            continue
+
+        campos_a_revisar = [c for c in columnas_evaluar if not str(row.get(c, "")).strip() or str(row.get(c, "")).strip() in ['nan', 'None']]
+        asunto_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
+
+        print(f"   [{i}/{len(filas_novedad)}] Auditando {nombre_pdf}...", flush=True)
+
+        datos_auditados = auditar_fila_con_ia_experta(ruta_pdf_completa, asunto_actual, campos_a_revisar, nombre_pdf, tipo_flujo, i)
+
+        if datos_auditados:
+            try:
+                doc_t = fitz.open(ruta_pdf_completa)
+                txt_t = ""
+                for p in doc_t: txt_t += p.get_text() + "\n"
+                doc_t.close()
+            except:
+                txt_t = ""
+
+            datos_pulidos = motor_cero_vacios(datos_auditados, nombre_pdf, txt_t, "", "2017", tipo_flujo)
+
+            for col_nombre in columnas_evaluar:
+                clave_dict = col_nombre.replace(" (DD/MM/AAAA)", "").replace(" / TIPO DOCUMENTAL", "").replace(" ", "_")
+                val_nuevo = datos_pulidos.get(clave_dict, "")
+                if val_nuevo and str(val_nuevo).strip():
+                    df_mem.at[idx, col_nombre] = str(val_nuevo).strip()
+
+            corregidos += 1
+
+    df_mem.to_csv(ruta_memoria, index=False)
+    print(f"🎉 Auditoría Final completada: {corregidos} cartas corregidas.", flush=True)
+
+# ==============================================================================
+# PROCESO PRINCIPAL
+# ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (ASUNTO FORMAL REAL | CERO CÓDIGOS CI004_)", flush=True)
+    print(" MOTOR RESTREPO_2 (EXPRIMIDO TOTAL + AUDITORÍA FINAL EXPERTA)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -595,6 +741,9 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
+    if not evento_cuota_agotada.is_set():
+        auditar_y_corregir_tabla_final(ruta_memoria)
+
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
@@ -634,7 +783,7 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
 
             print(f"\n✅ EXCEL CON 2 HOJAS GENERADO:", flush=True)
             print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas", flush=True)
-            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas (con códigos CI.004 completos y asuntos reales)", flush=True)
+            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas", flush=True)
 
 def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
@@ -647,8 +796,10 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     msg.set_content(
         f'Hola Eduardo,\n\n'
         f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
-        f'Se ha alcanzado el límite de cuota en las claves de Gemini.\n\n'
-        f'El avance está guardado en el archivo adjunto.\n\n'
+        f'Todas las claves agotaron todos sus modelos y entraron en enfriamiento de 24 horas.\n\n'
+        f'Por favor, renueva las APIs o espera 24 horas para continuar.\n\n'
+        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
+        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
         f'Saludos!'
     )
 
@@ -664,7 +815,7 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
             smtp.send_message(msg)
         print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!", flush=True)
     except Exception as e:
-        print(f"❌ Error al enviar correo: {e}")
+        print(f"❌ Error al enviar correo de alerta: {e}")
 
 def enviar_correo_exito(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
@@ -679,8 +830,8 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
         f'El archivo adjunto contiene las 2 hojas completas:\n'
         f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
-        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado literal completo CI.004/... impreso en la carta.\n\n'
-        f'Todos los radicados están completos y los asuntos son 100% reales y formales extraídos de los documentos (cero códigos CI004_).\n\n'
+        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado GP.\n\n'
+        f'Todos los radicados están completos y los asuntos fueron auditados por IA.\n\n'
         f'Saludos!'
     )
 
