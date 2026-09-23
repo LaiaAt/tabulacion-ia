@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (COMETAPI / GLM-4.6V-FLASH + COOLDOWN 24H)
+# SISTEMA DE TABULACIÓN RESTREPO_3 (COMETAPI / GLM-4.6V-FLASH + COOLDOWN 24H)
 # PRUEBA TODOS LOS MODELOS POR API | SI TODOS FALLAN -> ENFRIAMIENTO 24 HORAS
 # SI TODAS LAS APIS ESTÁN EN 24H -> DETIENE EL PROGRAMA Y ENVÍA ALERTA
 # ==============================================================================
@@ -389,7 +389,7 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
     return archivos_encontrados
 
 def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
-    archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
+    archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and 'RESTREPO_3' in f and carpeta_objetivo in f]
     
     if not archivos_memoria:
         return set(), 1
@@ -691,7 +691,7 @@ def auditar_y_corregir_tabla_final(ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (COMETAPI / GLM-4.6V-FLASH + AUDITORÍA FINAL)", flush=True)
+    print(" MOTOR RESTREPO_3 (COMETAPI / GLM-4.6V-FLASH + AUDITORÍA FINAL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -707,12 +707,12 @@ def procesar_archivos():
         print(f"🎲 MODO PRUEBA: {limite} archivos por flujo.", flush=True)
         etiqueta = f"PRUEBA_{limite}_archivos"
 
-    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
-    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
+    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_3_IA_memoria_{carpeta_objetivo}.csv')
+    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_3_IA_{carpeta_objetivo}.xlsx')
 
     reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
     if reiniciar:
-        archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
+        archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and 'RESTREPO_3' in f and carpeta_objetivo in f]
         for m in archivos_memoria:
             os.remove(os.path.join(RUTA_BASE, m))
             print(f"🧹 REINICIO FORZADO: Memoria {m} eliminada.", flush=True)
