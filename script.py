@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (EXCLUSIVO MISTRAL PIXTRAL + ENVÍO A GMAIL)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (PIXTRAL - CON REGLA ESTRICTA REF)
 # ==============================================================================
 
 import os
@@ -33,7 +33,6 @@ if len(mistral_key) <= 10:
 
 print("   ✅ Motor Pixtral conectado y listo.", flush=True)
 
-# MODELOS OFICIALES PIXTRAL
 MODELOS_PIXTRAL = [
     "pixtral-12b-2409",
     "pixtral-large-latest"
@@ -49,27 +48,21 @@ RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
 
-def limpiar_asunto(asunto_raw, texto_doc=""):
+def limpiar_asunto(asunto_raw, texto_doc="", es_radicada=False):
     try:
-        m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-        if m_asunto_expl:
-            t_as = " ".join(m_asunto_expl.group(1).split()).strip()
-            t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
-            if len(t_as) > 3 and not t_as.startswith("CI004_"):
-                asunto_raw = t_as
-        elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
-            m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-            if m:
-                asunto_raw = " ".join(m.group(1).split())
-            else:
-                m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración)[^\n\r]+', texto_doc, re.IGNORECASE)
-                asunto_raw = m2.group(0).strip() if m2 else ""
-
         t = " ".join(str(asunto_raw).strip().split())
         t = re.sub(r'[1lI\|]{4,}', ' ', t)
         t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
         t = " ".join(t.split())
-        return ILLEGAL_CHARACTERS_RE.sub("", t)
+        t = ILLEGAL_CHARACTERS_RE.sub("", t)
+
+        # Si es carta Radicada y en el documento original era una Referencia, asegurar el prefijo "Ref.: "
+        if es_radicada:
+            tiene_ref_en_texto = bool(re.search(r'\b(Ref\.?|REFERENCIA)\s*:', texto_doc, re.IGNORECASE))
+            if tiene_ref_en_texto and not re.match(r'^(?:Ref\.?|REFERENCIA)\s*:', t, re.IGNORECASE):
+                t = f"Ref.: {t}"
+
+        return t
     except Exception:
         return ""
 
@@ -137,15 +130,19 @@ Eres un auditor archivístico experto de correspondencia técnica y contractual.
 Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento formal.
 PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
-CAMPOS REQUERIDOS:
+REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
 2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, su nombre completo.
-4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI, sello GP).
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, transcribe su nombre completo.
+4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
-6. "ASUNTO": Transcribe SOLO el Asunto o Referencia formal. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
+6. "ASUNTO": 
+   - Si la carta tiene "Ref.:" o "REFERENCIA:", DEBES TRANSCRIBIRLO OBLIGATORIAMENTE INCLUYENDO EL PREFIJO "Ref.: " (ejemplo: "Ref.: Contrato de Interventoría 145 de 2014...").
+   - Si tiene "ASUNTO:", transcribe el texto literal.
+   - PROHIBIDO suprimir o borrar la palabra "Ref.:" si aparece en el encabezado.
+   - PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
-DEVOLVER OBLIGATORIAMENTE UN JSON:
+DEVOLVER OBLIGATORIAMENTE UN JSON VÁLIDO:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -304,7 +301,8 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    asunto_final = limpiar_asunto(ia_asunto, texto_completo)
+    # Se aplica la regla para conservar Ref.: en RADICADAS
+    asunto_final = limpiar_asunto(ia_asunto, texto_completo, es_radicada=(not es_recibida))
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
@@ -356,7 +354,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (SISTEMA EXCLUSIVO PIXTRAL)", flush=True)
+    print(" MOTOR RESTREPO_2 (PIXTRAL - CON REGLA REF Y ENVÍO A GMAIL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'si').strip().lower() in ['si', 's', 'true']
@@ -369,7 +367,7 @@ def procesar_archivos():
         ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
         if os.path.exists(ruta_memoria): os.remove(ruta_memoria)
         if os.path.exists(ruta_excel): os.remove(ruta_excel)
-        print(f"🧪 MODO PRUEBA ACTIVO: Se tabularán {limite} de Enviadas y {limite} de Recibidas. Memoria intacta.", flush=True)
+        print(f"🧪 MODO PRUEBA ACTIVO: {limite} de Enviadas y {limite} de Recibidas. Memoria intacta.", flush=True)
     else:
         limite = None
         etiqueta = f"{carpeta_objetivo}"
@@ -411,7 +409,6 @@ def procesar_archivos():
 
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
     
-    # ENVÍO AUTOMÁTICO DE CORREO
     print("\n📧 Enviando correo con el archivo Excel...", flush=True)
     enviar_correo_exito(ruta_excel, etiqueta)
     print("\n🏁 Proceso concluido.", flush=True)
