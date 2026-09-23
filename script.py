@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (PIXTRAL: REPARACIÓN DE RUIDO Y AUDITORÍA)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (PIXTRAL: EXTRACTOR LIMPIO Y DESINFECTADO)
 # ==============================================================================
 
 import os
@@ -35,8 +35,7 @@ if not lista_keys:
 
 print(f"   ✅ Pool activo con {len(lista_keys)} clave(s) de Mistral.", flush=True)
 
-MODELOS_FASE_TURBO = ["pixtral-12b-2409", "pixtral-large-latest"]
-MODELOS_AUDITORIA = ["pixtral-large-latest", "pixtral-12b-2409"]
+MODELOS_PIXTRAL = ["pixtral-12b-2409", "pixtral-large-latest"]
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -52,11 +51,9 @@ cooldown_keys = {k: 0.0 for k in lista_keys}
 
 def depurar_ruido_asunto(asunto_raw, texto_doc=""):
     """
-    Filtro quirúrgico contra el ruido de escáner y de OCR:
-    - Quita corchetes [ ], puntos y comillas al inicio.
-    - Quita leyendas de stickers ('recibido no implica aceptacion', 'radicacion honda').
-    - Quita códigos de barras ('111 1' 11', 'I II III', barras verticales).
-    - Aplica las reglas exactas: Ref. en Radicadas / Solo texto tras ASUNTO: en Recibidas.
+    Filtro quirúrgico contra ruido de stickers, códigos de barras y corchetes:
+    - En Recibidas: elimina corchetes [ ], puntos y comillas iniciales.
+    - En Radicadas: conserva 'Ref. ' y corta cualquier código de barras o leyenda de sticker.
     """
     if not asunto_raw or str(asunto_raw).strip() in ['nan', 'None', 'NAN']:
         asunto_raw = ""
@@ -74,8 +71,10 @@ def depurar_ruido_asunto(asunto_raw, texto_doc=""):
         if len(t_asunto) > 3 and not t_asunto.startswith("CI004_"):
             t = t_asunto
 
-    # 3. Eliminar basura de código de barras y stickers
+    # 3. Eliminar basura de código de barras, stickers y membretes
     t = re.sub(r'Este recibido no impl?i?ca aceptaci[oó]n[^\.\n]*', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'Esle:? recibido[^\.\n]*', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'Ele recibido[^\.\n]*', '', t, flags=re.IGNORECASE)
     t = re.sub(r'ALMA-R-2017-\d{4,6}', '', t)
     t = re.sub(r'\b(?:RADICACION|Radicaci[oó]n)\s+(?:HONDA|Honda)\b', '', t)
     t = re.sub(r'[1lI\|i\'\:\!]{4,}', ' ', t)
@@ -84,7 +83,7 @@ def depurar_ruido_asunto(asunto_raw, texto_doc=""):
     # 4. Quitar la palabra "ASUNTO:" si quedó al inicio
     t = re.sub(r'^ASUNTO\s*[:\-\.]*\s*', '', t, flags=re.IGNORECASE).strip()
 
-    # 5. Si la carta original empieza con Ref. (como Imagen 1 e Imagen 2), asegurar que empiece con Ref.
+    # 5. Si la carta original empieza con Ref. (Radicadas), asegurar que empiece con Ref.
     if not m_asunto_expl and not t.lower().startswith("ref"):
         m_ref = re.search(r'\b(Ref\.?)\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
         if m_ref:
@@ -111,7 +110,6 @@ def obtener_insumos_documento(ruta_pdf):
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
-        # Detección de carátulas remisiorias de la ANI
         num_pag_imagen = 0
         es_caratula_ani = (
             "al contestar cite el numero de radicado" in texto_pag1.lower() or
@@ -171,30 +169,13 @@ REGLAS DE EXTRACCIÓN:
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO" (SIGUE ESTAS 3 REGLAS ESTRICTAS):
-   - CASO 1 (Cartas con bloque de Ref.): Transcribe TODO el bloque comenzando con 'Ref. ' y uniendo todas las líneas con guiones. NUNCA transcribas párrafos del cuerpo de la carta ni códigos de barras.
+   - CASO 1 (Cartas con bloque de Ref.): Transcribe TODO el bloque comenzando con 'Ref. ' y uniendo todas las líneas con guiones. NUNCA transcribas párrafos del cuerpo de la carta ni códigos de barras ni leyendas de stickers.
      Ejemplo: "Ref. Contrato de Concesión 003 de 2014 - Concesión Honda – Girardot – Puerto Salgar - Seguridad Vial Pasos Zonas Escolares - Respuesta ALMA-2017-3700"
    - CASO 2 (Cartas con carátula de la ANI): Ignora la carátula con nombre técnico (CI004_...). Transcribe todo el bloque de la carta real comenzando con 'Ref. '.
    - CASO 3 (Cartas con REFERENCIA y ASUNTO separados): Ignora la REFERENCIA. Transcribe ÚNICAMENTE lo que dice después de 'ASUNTO:'. NUNCA incluyas corchetes '[', ']' ni la palabra 'ASUNTO:'.
+     Ejemplo: "Entrega de un (1) expediente predial de la Unidad Funcional 3, para aprobación de Ficha Predial."
 
 DEVOLVER OBLIGATORIAMENTE UN JSON VÁLIDO:
-{
-    "RAZON_SOCIAL_REMITENTE": "...",
-    "NO_RADICADO_REMITENTE": "...",
-    "RAZON_SOCIAL_DESTINATARIO": "...",
-    "NO_RADICADO_DESTINATARIO": "...",
-    "FECHA": "DD/MM/AAAA",
-    "ASUNTO": "..."
-}
-"""
-
-PROMPT_AUDITORIA_CALIDAD_FINAL = """
-Eres el Auditor Principal de Control de Calidad Archivística.
-Tu misión es inspeccionar esta carta que tiene texto con ruido de escáner o párrafos volcados por error.
-Devuelve el JSON con los datos PERFECTOS y LIMPIOS:
-1. En el ASUNTO: Si tiene 'Ref.', transcribe todo el bloque comenzando con 'Ref. '. Si tiene 'ASUNTO:', transcribe SOLO lo que está después de los dos puntos (sin corchetes y sin la palabra ASUNTO:).
-2. PROHIBIDO copiar texto del cuerpo de la carta, códigos de barras (111 1'), direcciones o nombres de archivo (CI004_).
-
-JSON REQUERIDO:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -240,7 +221,7 @@ def consultar_pixtral_pool(b64_img, texto_digital, nombre_archivo, tipo_flujo, i
             "Content-Type": "application/json"
         }
 
-        for mod in MODELOS_FASE_TURBO:
+        for mod in MODELOS_PIXTRAL:
             try:
                 payload = {
                     "model": mod,
@@ -274,158 +255,6 @@ def consultar_pixtral_pool(b64_img, texto_digital, nombre_archivo, tipo_flujo, i
                 continue
 
     return None, "", ""
-
-def auditar_fila_con_pixtral_experto(ruta_pdf, texto_actual, campos_dudosos, nombre_archivo, tipo_flujo, key_idx):
-    try:
-        doc = fitz.open(ruta_pdf)
-        total_pags = len(doc)
-        imagenes_b64 = []
-
-        for p_idx in range(min(total_pags, 2)):
-            pix = doc[p_idx].get_pixmap(dpi=130)
-            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-            if img.width > 1100:
-                ratio = 1100 / float(img.width)
-                img = img.resize((1100, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=75, optimize=True)
-            imagenes_b64.append(base64.b64encode(buf.getvalue()).decode('utf-8'))
-        doc.close()
-    except Exception:
-        return None
-
-    prompt_auditor = (
-        f"DOCUMENTO: {nombre_archivo}\n"
-        f"CAMPOS QUE REQUIEREN AUDITORÍA: {', '.join(campos_dudosos)}\n"
-        f"TEXTO ACTUAL AUDITADO: '{texto_actual[:300]}'\n"
-        + PROMPT_AUDITORIA_CALIDAD_FINAL
-    )
-
-    num_keys = len(lista_keys)
-    for intento in range(num_keys):
-        idx = (key_idx + intento) % num_keys
-        k_actual = lista_keys[idx]
-        nombre_key = f"Key-{idx+1}"
-
-        with lock_keys:
-            if cooldown_keys[k_actual] > time.time():
-                continue
-
-        headers = {
-            "Authorization": f"Bearer {k_actual}",
-            "Content-Type": "application/json"
-        }
-
-        for mod in MODELOS_AUDITORIA:
-            try:
-                content = [{"type": "text", "text": prompt_auditor}]
-                for b64 in imagenes_b64:
-                    content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64}"})
-
-                payload = {
-                    "model": mod,
-                    "temperature": 0.0,
-                    "response_format": {"type": "json_object"},
-                    "messages": [{"role": "user", "content": content}]
-                }
-
-                resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    contenido = data["choices"][0]["message"]["content"]
-                    d = parsear_json(contenido)
-                    if d and isinstance(d, dict) and any(d.values()):
-                        return d
-                elif resp.status_code == 429:
-                    with lock_keys:
-                        cooldown_keys[k_actual] = time.time() + 5
-                    break
-            except Exception:
-                continue
-
-    return None
-
-def auditar_y_corregir_tabla_final(ruta_memoria):
-    if not os.path.exists(ruta_memoria):
-        return
-
-    df_mem = pd.read_csv(ruta_memoria)
-    if df_mem.empty:
-        return
-
-    print("\n🧐 [FASE 2: AUDITORÍA DE CALIDAD] Desinfectando ruido viejo de Gemini y celdas vacías...", flush=True)
-
-    columnas_evaluar = [
-        "RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE",
-        "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO",
-        "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"
-    ]
-
-    filas_novedad = []
-
-    # PASO A: Limpieza rápida por Regex en toda la tabla (para corchetes [, puntos y basura superficial)
-    for idx, row in df_mem.iterrows():
-        asunto_val = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
-        asunto_limpio = depurar_ruido_asunto(asunto_val)
-        df_mem.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = asunto_limpio
-
-        # Detectar si la fila tiene ruido grave que requiere re-auditoría con Pixtral Large
-        tiene_vacios = any(not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None', 'NAN'] for col in columnas_evaluar)
-        tiene_cuerpo_volcado = len(asunto_limpio) > 180 or "De conformidad" in asunto_limpio or "radicado en nuestras" in asunto_limpio
-        tiene_nombre_archivo = "CI004_" in asunto_limpio or "004_" in asunto_limpio
-        tiene_sticker_pegado = "no implica" in asunto_limpio.lower() or "honda - tolima" in asunto_limpio.lower() or "calle 13" in asunto_limpio.lower()
-
-        if tiene_vacios or tiene_cuerpo_volcado or tiene_nombre_archivo or tiene_sticker_pegado or len(asunto_limpio) < 6:
-            filas_novedad.append(idx)
-
-    print(f"🧹 Limpieza superficial aplicada a {len(df_mem)} filas.")
-
-    if not filas_novedad:
-        print("✅ Control de Calidad: 100% de las filas están perfectamente limpias.", flush=True)
-        df_mem.to_csv(ruta_memoria, index=False)
-        return
-
-    print(f"⚠️ Detectadas {len(filas_novedad)} carta(s) con ruido grave heredado de Gemini. Re-auditando con Pixtral Large...", flush=True)
-
-    corregidos = 0
-    for i, idx in enumerate(filas_novedad, 1):
-        row = df_mem.loc[idx]
-        ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
-        ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
-        nombre_pdf = os.path.basename(ubic_rel)
-        tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
-
-        if not os.path.exists(ruta_pdf_completa):
-            continue
-
-        campos_a_revisar = [c for c in columnas_evaluar if not str(row.get(c, "")).strip() or str(row.get(c, "")).strip() in ['nan', 'None']]
-        asunto_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
-
-        print(f"   [{i}/{len(filas_novedad)}] Reparando {nombre_pdf}...", flush=True)
-        datos_auditados = auditar_fila_con_pixtral_experto(ruta_pdf_completa, asunto_actual, campos_a_revisar, nombre_pdf, tipo_flujo, i)
-
-        if datos_auditados:
-            try:
-                doc_t = fitz.open(ruta_pdf_completa)
-                txt_t = ""
-                for p in doc_t: txt_t += p.get_text() + "\n"
-                doc_t.close()
-            except:
-                txt_t = ""
-
-            datos_pulidos = motor_cero_vacios(datos_auditados, nombre_pdf, txt_t, "", "2017", tipo_flujo)
-
-            for col_nombre in columnas_evaluar:
-                clave_dict = col_nombre.replace(" (DD/MM/AAAA)", "").replace(" / TIPO DOCUMENTAL", "").replace(" ", "_")
-                val_nuevo = datos_pulidos.get(clave_dict, "")
-                if val_nuevo and str(val_nuevo).strip():
-                    df_mem.at[idx, col_nombre] = str(val_nuevo).strip()
-
-            corregidos += 1
-            time.sleep(0.5)
-
-    df_mem.to_csv(ruta_memoria, index=False)
-    print(f"🎉 Auditoría Final: {corregidos} cartas con ruido de Gemini fueron 100% reparadas.", flush=True)
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
@@ -518,7 +347,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    # Aplicación de limpieza y depuración de ruido
+    # Depuración de Asunto
     asunto_final = depurar_ruido_asunto(ia_asunto, texto_completo)
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
@@ -583,8 +412,16 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=Fa
         df = pd.read_csv(ruta_memoria_final)
         if df.empty or "UBICACION_ARCHIVO" not in df.columns:
             return set(), 1
+
+        # Limpieza masiva de corchetes en memoria previa
+        for idx, row in df.iterrows():
+            asunto_original = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
+            asunto_limpio = depurar_ruido_asunto(asunto_original)
+            df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = asunto_limpio
+
+        df.to_csv(ruta_memoria_final, index=False)
         procesados = set(os.path.basename(str(r).strip()).lower() for r in df["UBICACION_ARCHIVO"].dropna())
-        print(f"✅ Memoria previa cargada: {len(procesados)} cartas aseguradas.", flush=True)
+        print(f"✅ Memoria previa desinfectada: {len(procesados)} cartas aseguradas.", flush=True)
         return procesados, len(df) + 1
     except Exception as e:
         print(f"⚠️ Error cargando memoria: {e}", flush=True)
@@ -592,7 +429,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=Fa
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (PIXTRAL: REPARACIÓN QUIRÚRGICA DE RUIDO)", flush=True)
+    print(" MOTOR RESTREPO_2 (PIXTRAL: EXTRACTOR LIMPIO Y DESINFECTADO)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
@@ -631,7 +468,7 @@ def procesar_archivos():
             print(f"✅ Todas las cartas de {tipo} ya están en memoria.", flush=True)
             continue
 
-        print(f"\n📂 [FASE 1: BARRIDO] Tabulando {len(pendientes)} cartas pendientes en {tipo}...", flush=True)
+        print(f"\n📂 Tabulando {len(pendientes)} cartas pendientes/reparadas en {tipo}...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -645,13 +482,9 @@ def procesar_archivos():
             for f in as_completed(futuros):
                 pass
 
-    # FASE 2: AUDITORÍA DE CALIDAD EXPERTA (LIMPIA Y REPARA TODO EL ARCHIVO)
-    if not es_prueba:
-        auditar_y_corregir_tabla_final(ruta_memoria)
-
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
     
-    print("\n📧 Enviando correo con el archivo Excel final desinfectado...", flush=True)
+    print("\n📧 Enviando correo con el archivo Excel final...", flush=True)
     enviar_correo_exito(ruta_excel, etiqueta)
     print("\n🏁 Proceso concluido exitosamente.", flush=True)
 
@@ -666,6 +499,11 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
         try:
             df_final = pd.read_csv(ruta_memoria)
             if not df_final.empty:
+                # Limpieza final de corchetes y espacios antes de exportar
+                for idx, row in df_final.iterrows():
+                    asunto_orig = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
+                    df_final.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = depurar_ruido_asunto(asunto_orig)
+
                 es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
                 df_recibidas = df_final[es_recibida].copy()
                 df_radicadas = df_final[~es_recibida].copy()
@@ -699,8 +537,8 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
         msg['To'] = EMAIL_DESTINO
         msg.set_content(
             f'Hola,\n\n'
-            f'El proceso de tabulación y auditoría desinfectante con Mistral Pixtral ha finalizado exitosamente para {etiqueta}.\n\n'
-            f'Se adjunta el archivo Excel final con las 2 hojas completamente limpias de ruido ("Recibidas" y "Radicadas").\n\n'
+            f'El proceso de tabulación y desinfección con Mistral Pixtral ha finalizado exitosamente para {etiqueta}.\n\n'
+            f'Se adjunta el archivo Excel final completamente limpio de ruido ("Recibidas" y "Radicadas").\n\n'
             f'Saludos cordiales.'
         )
 
