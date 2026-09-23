@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (EXPRIMIDO TOTAL DE MODELOS + COOLDOWN 24H)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (COMETAPI / GLM-4.6V-FLASH + COOLDOWN 24H)
 # PRUEBA TODOS LOS MODELOS POR API | SI TODOS FALLAN -> ENFRIAMIENTO 24 HORAS
 # SI TODAS LAS APIS ESTÁN EN 24H -> DETIENE EL PROGRAMA Y ENVÍA ALERTA
 # ==============================================================================
@@ -26,29 +26,29 @@ if hasattr(sys.stdout, 'reconfigure'):
 import pymupdf as fitz
 from PIL import Image
 import io
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
-print("⏳ [1/3] Cargando Pool de Claves Gemini...", flush=True)
+print("⏳ [1/3] Cargando Pool de Claves CometAPI...", flush=True)
 
-raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
+raw_keys = os.environ.get('COMET_API_KEYS') or os.environ.get('COMET_API_KEY') or ""
 lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
 
 gemini_clients = []
 for i, k in enumerate(lista_keys, 1):
     try:
-        c = genai.Client(
+        c = OpenAI(
             api_key=k,
-            http_options=types.HttpOptions(timeout=25_000)
+            base_url="https://api.cometapi.com/v1",
+            timeout=60.0
         )
         gemini_clients.append((f"Key-{i}", c))
     except Exception as e:
-        print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
+        print(f"⚠️ Error cargando clave #{i}: {e}", flush=True)
 
 if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas.", flush=True)
+    print(f"✅ Pool de CometAPI activo con {len(gemini_clients)} claves listas.", flush=True)
 else:
-    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
+    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de CometAPI.", flush=True)
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -66,22 +66,14 @@ evento_cuota_agotada = threading.Event()
 key_cooldowns = {nombre: 0.0 for nombre, _ in gemini_clients}
 
 # ==============================================================================
-# LISTADO DE MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
+# LISTADO DE MODELOS DISPONIBLES EN COMETAPI (GLM-4.6V-FLASH GRATUITO)
 # ==============================================================================
 MODELOS_FASE_TURBO = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash"
+    "glm-4.6v-flash-free"
 ]
 
 MODELOS_AUDITORES = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash"
+    "glm-4.6v-flash-free"
 ]
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -200,7 +192,6 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
 
     apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
-    part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
     total_keys = len(gemini_clients)
     start_idx = (item_num + hilo_id) % total_keys
@@ -226,26 +217,33 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             if key_cooldowns.get(nombre_key, 0) > time.time():
                 continue
 
-        exito_en_algun_modelo = False
         clave_invalida = False
 
         # EXPRIMIR TODOS LOS MODELOS EN ESTA API
         for mod in MODELOS_FASE_TURBO:
             try:
-                r = client.models.generate_content(
-                    model=mod, contents=[part_img, prompt_final],
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                r = client.chat.completions.create(
+                    model=mod,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_final},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                        ]
+                    }],
+                    response_format={"type": "json_object"},
+                    temperature=0.0
                 )
-                d = parsear_json(r.text)
+                d = parsear_json(r.choices[0].message.content)
                 if d and isinstance(d, dict) and any(d.values()):
                     return d, nombre_key, mod
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "RATE LIMIT"]):
                     time.sleep(0.3)
                     continue  # Continúa al siguiente modelo
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google (401/403). Se descarta permanentemente.", flush=True)
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403", "INVALID_API_KEY", "AUTHENTICATION"]):
+                    print(f"      ❌ {nombre_key} rechazada por CometAPI (401/403). Se descarta permanentemente.", flush=True)
                     clave_invalida = True
                     break
                 else:
@@ -254,7 +252,7 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         with lock_key:
             if clave_invalida:
                 key_cooldowns[nombre_key] = time.time() + (86400 * 365)  # Descarte permanente
-            elif not exito_en_algun_modelo:
+            else:
                 print(f"      🔴 {nombre_key} agotó todos sus modelos. Enfriamiento de 24h.", flush=True)
                 key_cooldowns[nombre_key] = time.time() + 86400
 
@@ -532,7 +530,7 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
     try:
         doc = fitz.open(ruta_pdf)
         total_pags = len(doc)
-        partes = []
+        imagenes_b64 = []
 
         for p_idx in range(min(total_pags, 2)):
             pix = doc[p_idx].get_pixmap(dpi=160)
@@ -542,8 +540,8 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
                 img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85, optimize=True)
-            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
-        
+            imagenes_b64.append(base64.b64encode(buf.getvalue()).decode('utf-8'))
+
         doc.close()
     except Exception:
         return None
@@ -554,7 +552,10 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
         f"TEXTO ACTUAL AUDITADO: '{texto_actual}'\n"
         + PROMPT_AUDITORIA_CALIDAD_FINAL
     )
-    partes.append(prompt_auditor)
+
+    contenido_mensaje = [{"type": "text", "text": prompt_auditor}]
+    for b64 in imagenes_b64:
+        contenido_mensaje.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
     total_keys = len(gemini_clients)
 
@@ -573,21 +574,23 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
 
         for mod in MODELOS_AUDITORES:
             try:
-                r = client.models.generate_content(
-                    model=mod, contents=partes,
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                r = client.chat.completions.create(
+                    model=mod,
+                    messages=[{"role": "user", "content": contenido_mensaje}],
+                    response_format={"type": "json_object"},
+                    temperature=0.0
                 )
-                d = parsear_json(r.text)
+                d = parsear_json(r.choices[0].message.content)
                 if d and isinstance(d, dict) and any(d.values()):
                     print(f"      ✨ [AUDITORÍA FILA | {nombre_key} | {mod}] Datos corregidos y completados.", flush=True)
                     return d
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT", "RATE LIMIT"]):
                     time.sleep(0.3)
                     continue
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
+                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403", "INVALID_API_KEY", "AUTHENTICATION"]):
+                    print(f"      ❌ {nombre_key} rechazada por CometAPI. Se descarta permanentemente.", flush=True)
                     clave_invalida = True
                     break
                 else:
@@ -688,7 +691,7 @@ def auditar_y_corregir_tabla_final(ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (EXPRIMIDO TOTAL + AUDITORÍA FINAL EXPERTA)", flush=True)
+    print(" MOTOR RESTREPO_2 (COMETAPI / GLM-4.6V-FLASH + AUDITORÍA FINAL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -741,7 +744,7 @@ def procesar_archivos():
             print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
             continue
 
-        num_trabajadores = 8
+        num_trabajadores = 4
         print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} HILOS...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
@@ -807,7 +810,7 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
         return
 
     msg = EmailMessage()
-    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
+    msg['Subject'] = f'🚨 ALERTA: Cuotas de CometAPI Agotadas ({etiqueta}) - Proceso Pausado'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
     msg.set_content(
