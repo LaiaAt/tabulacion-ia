@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (MISTRAL PIXTRAL + GEMINI FLASH REAL)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (GEMINI FLASH REAL + MISTRAL PIXTRAL)
 # ==============================================================================
 
 import os
@@ -14,6 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 import pandas as pd
+import requests
 
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
@@ -26,21 +27,11 @@ import io
 
 print("⏳ [1/3] Inicializando Motores de Inteligencia Artificial...", flush=True)
 
-# 1. MISTRAL AI
-mistral_client = None
-m_key = os.environ.get('MISTRAL_API_KEY', '').strip()
-if len(m_key) > 10:
-    try:
-        from mistralai import Mistral
-        mistral_client = Mistral(api_key=m_key)
-        print("   ✅ Mistral AI configurado.", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ Error cargando Mistral: {e}", flush=True)
-
-# 2. GEMINI (GOOGLE AI STUDIO CON MODELOS REALES)
+# 1. CONFIGURACIÓN GEMINI (GOOGLE AI STUDIO)
 gemini_clients = []
 raw_gemini = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
 gemini_keys = [k.strip() for k in raw_gemini.replace('\n', ',').split(',') if len(k.strip()) > 10]
+
 if gemini_keys:
     try:
         from google import genai
@@ -50,11 +41,25 @@ if gemini_keys:
             gemini_clients.append((f"Gemini-Key-{i}", c))
         print(f"   ✅ Google Gemini configurado con {len(gemini_clients)} clave(s).", flush=True)
     except Exception as e:
-        print(f"   ⚠️ Error cargando Gemini: {e}", flush=True)
+        print(f"   ⚠️ Error inicializando Gemini: {e}", flush=True)
 
-if not mistral_client and not gemini_clients:
-    print("❌ ERROR CRÍTICO: No se detectó ninguna API Key válida (ni Mistral ni Gemini).", flush=True)
+# 2. CONFIGURACIÓN MISTRAL AI
+mistral_key = os.environ.get('MISTRAL_API_KEY', '').strip()
+if len(mistral_key) > 10:
+    print("   ✅ Mistral AI listo (vía API directa).", flush=True)
+
+if not gemini_clients and len(mistral_key) <= 10:
+    print("❌ ERROR CRÍTICO: No se detectó ninguna API Key válida.", flush=True)
     sys.exit(1)
+
+# MODELOS SOLICITADOS OFICIALMENTE POR LA API
+MODELOS_GEMINI = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash"
+]
+MODELOS_MISTRAL = ["pixtral-12b-2409", "mistral-small-latest"]
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -117,15 +122,15 @@ def obtener_insumos_documento(ruta_pdf):
             texto_para_ia = texto_pag1
 
         pagina = doc[num_pag_imagen]
-        pix = pagina.get_pixmap(dpi=130)
+        pix = pagina.get_pixmap(dpi=140)
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
 
-        if img.width > 1100:
-            ratio = 1100 / float(img.width)
-            img = img.resize((1100, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+        if img.width > 1200:
+            ratio = 1200 / float(img.width)
+            img = img.resize((1200, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
 
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=75, optimize=True)
+        img.save(buffer, format="JPEG", quality=80, optimize=True)
         img_bytes = buffer.getvalue()
         b64_str = base64.b64encode(img_bytes).decode('utf-8')
         doc.close()
@@ -151,18 +156,19 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
     return fecha_str
 
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto. Transcribe LITERALMENTE lo que observas en este documento contractual.
-Si un dato no existe, déjalo vacío "". PROHIBIDO inventar o usar frases como "SIN ASUNTO CONSTATADO".
+Eres un auditor archivístico experto de correspondencia técnica y contractual.
+Transcribe EXACTA, PURA y LITERALMENTE lo que ves en el documento formal.
+PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no existe, déjalo vacío "".
 
 CAMPOS REQUERIDOS:
-1. "RAZON_SOCIAL_REMITENTE": Quién emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
-2. "NO_RADICADO_REMITENTE": Radicado oficial emisor (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": A quién va dirigida la carta. Si es persona natural, transcribe su nombre.
-4. "NO_RADICADO_DESTINATARIO": Sticker de recibido, sello de radicado o radicado GP.
-5. "FECHA": Fecha real de la carta (Formato DD/MM/AAAA).
-6. "ASUNTO": Transcribe el Asunto literal. PROHIBIDO poner nombres de archivos técnicos como "CI004_...".
+1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, su nombre completo.
+4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI, sello GP).
+5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
+6. "ASUNTO": Transcribe SOLO el Asunto o Referencia formal. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
-DEVOLVER OBLIGATORIAMENTE UN OBJETO JSON VÁLIDO:
+DEVOLVER OBLIGATORIAMENTE UN JSON:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -186,46 +192,21 @@ def parsear_json(texto):
         return None
 
 # ==============================================================================
-# CONSULTA DE IA CON REPORTE DE ERRORES Y RELEVO
+# CONSULTA DE IA (GEMINI ACTUALIZADO CON RELEVO A MISTRAL VÍA API)
 # ==============================================================================
 def consultar_ia_robusta(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
     if not b64_img or evento_cuota_agotada.is_set():
         return None, "", ""
 
-    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2000]}"
+    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
 
-    # 1. INTENTO CON MISTRAL (PIXTRAL)
-    if mistral_client:
-        for mod in ["pixtral-12b-2409", "mistral-small-latest"]:
-            try:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_final},
-                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_img}"}
-                        ]
-                    }
-                ]
-                r = mistral_client.chat.complete(
-                    model=mod,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    temperature=0.0
-                )
-                d = parsear_json(r.choices[0].message.content)
-                if d and isinstance(d, dict) and any(d.values()):
-                    return d, "Mistral", mod
-            except Exception as e:
-                print(f"      ❌ [Fallo Mistral {mod}]: {e}", flush=True)
-
-    # 2. RELEVO CON GEMINI FLASH (MODELOS OFICIALES)
+    # 1. INTENTO CON GOOGLE GEMINI (MODELOS VIGENTES)
     if gemini_clients and img_bytes:
         from google.genai import types
         part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
         for nombre_key, client in gemini_clients:
-            for mod in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]:
+            for mod in MODELOS_GEMINI:
                 try:
                     r = client.models.generate_content(
                         model=mod,
@@ -236,7 +217,42 @@ def consultar_ia_robusta(b64_img, img_bytes, texto_digital, nombre_archivo, tipo
                     if d and isinstance(d, dict) and any(d.values()):
                         return d, "Gemini", mod
                 except Exception as e:
-                    print(f"      ❌ [Fallo Gemini {mod}]: {e}", flush=True)
+                    # Si falla, se muestra el motivo exacto y prueba el siguiente
+                    print(f"      ℹ️ [{nombre_key} | {mod}]: {e}", flush=True)
+
+    # 2. INTENTO DE RELEVO CON MISTRAL AI (LLAMADA DIRECTA HTTP)
+    if len(mistral_key) > 10:
+        headers = {
+            "Authorization": f"Bearer {mistral_key}",
+            "Content-Type": "application/json"
+        }
+        for mod in MODELOS_MISTRAL:
+            try:
+                payload = {
+                    "model": mod,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_final},
+                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_img}"}
+                            ]
+                        }
+                    ]
+                }
+                resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=40)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    contenido = data["choices"][0]["message"]["content"]
+                    d = parsear_json(contenido)
+                    if d and isinstance(d, dict) and any(d.values()):
+                        return d, "Mistral", mod
+                else:
+                    print(f"      ℹ️ [Mistral {mod} HTTP {resp.status_code}]: {resp.text[:150]}", flush=True)
+            except Exception as e:
+                print(f"      ℹ️ [Fallo Mistral {mod}]: {e}", flush=True)
 
     return None, "", ""
 
@@ -357,7 +373,7 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     datos, proveedor, mod_usado = consultar_ia_robusta(b64_img, img_bytes, txt1, pdf, tipo)
 
     if datos is None:
-        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf} con ninguna IA.", flush=True)
+        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf}.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -405,8 +421,6 @@ def procesar_archivos():
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
     item_counter = 1
-
-    # En modo prueba usamos 1 solo trabajador para que la API gratuita nunca se bloquee por concurrencia
     num_trabajadores = 1 if es_prueba else 2
 
     for tipo, ruta_raiz in flujos:
@@ -432,7 +446,7 @@ def procesar_archivos():
                 futuros.append(f)
                 item_counter += 1
                 if es_prueba:
-                    time.sleep(1.0)  # Pausa de seguridad
+                    time.sleep(1.0)
 
             for f in as_completed(futuros):
                 pass
