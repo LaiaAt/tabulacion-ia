@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (PIXTRAL: EXTRACTOR LIMPIO Y DESINFECTADO)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CONTROL ESTRICTO DE ENTIDADES Y ASUNTOS)
 # ==============================================================================
 
 import os
@@ -49,53 +49,25 @@ lock_csv = threading.Lock()
 lock_keys = threading.Lock()
 cooldown_keys = {k: 0.0 for k in lista_keys}
 
-def depurar_ruido_asunto(asunto_raw, texto_doc=""):
+def limpiar_asunto_literal(texto_raw, es_recibida=False):
     """
-    Filtro quirúrgico contra ruido de stickers, códigos de barras y corchetes:
-    - En Recibidas: elimina corchetes [ ], puntos y comillas iniciales.
-    - En Radicadas: conserva 'Ref. ' y corta cualquier código de barras o leyenda de sticker.
+    Transcripción literal:
+    - En Recibidas: NUNCA lleva 'Ref.'. Quita 'ASUNTO:' inicial.
+    - En Radicadas: Transcribe exactamente lo impreso.
     """
-    if not asunto_raw or str(asunto_raw).strip() in ['nan', 'None', 'NAN']:
-        asunto_raw = ""
-    t = str(asunto_raw).strip()
-
-    # 1. Eliminar corchetes, comillas y puntos iniciales (ej. [Respuesta a... o . Observaciones...)
+    if not texto_raw or str(texto_raw).strip() in ['nan', 'None', 'NAN']:
+        return ""
+    t = " ".join(str(texto_raw).strip().split())
     t = re.sub(r'^[\[\(\.\,\-\_\s\"\'\\]+', '', t)
     t = re.sub(r'[\]\)\s\"\'\\]+$', '', t)
 
-    # 2. Si hay "ASUNTO:" explícito (como en Imagen 3), priorizar el texto tras los dos puntos
-    m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-    if m_asunto_expl:
-        t_asunto = " ".join(m_asunto_expl.group(1).split()).strip()
-        t_asunto = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_asunto, flags=re.IGNORECASE).strip()
-        if len(t_asunto) > 3 and not t_asunto.startswith("CI004_"):
-            t = t_asunto
-
-    # 3. Eliminar basura de código de barras, stickers y membretes
-    t = re.sub(r'Este recibido no impl?i?ca aceptaci[oó]n[^\.\n]*', '', t, flags=re.IGNORECASE)
-    t = re.sub(r'Esle:? recibido[^\.\n]*', '', t, flags=re.IGNORECASE)
-    t = re.sub(r'Ele recibido[^\.\n]*', '', t, flags=re.IGNORECASE)
-    t = re.sub(r'ALMA-R-2017-\d{4,6}', '', t)
-    t = re.sub(r'\b(?:RADICACION|Radicaci[oó]n)\s+(?:HONDA|Honda)\b', '', t)
-    t = re.sub(r'[1lI\|i\'\:\!]{4,}', ' ', t)
-    t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
-
-    # 4. Quitar la palabra "ASUNTO:" si quedó al inicio
+    # Quitar etiqueta ASUNTO:
     t = re.sub(r'^ASUNTO\s*[:\-\.]*\s*', '', t, flags=re.IGNORECASE).strip()
 
-    # 5. Si la carta original empieza con Ref. (Radicadas), asegurar que empiece con Ref.
-    if not m_asunto_expl and not t.lower().startswith("ref"):
-        m_ref = re.search(r'\b(Ref\.?)\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-        if m_ref:
-            bloque_ref = " ".join(m_ref.group(0).split()).strip()
-            if len(bloque_ref) > 10:
-                t = bloque_ref
-        elif "contrato" in t.lower() or "concesi" in t.lower():
-            t = f"Ref. {t}"
+    # En RECIBIDAS, bajo ninguna circunstancia se permite 'Ref.' al inicio
+    if es_recibida:
+        t = re.sub(r'^Ref\.?\s*', '', t, flags=re.IGNORECASE).strip()
 
-    # Limpieza final de espacios y caracteres ilegales
-    t = " ".join(t.split())
-    t = re.sub(r'^[\[\(\.\,\-\_\s\"\'\\]+', '', t).strip()
     return ILLEGAL_CHARACTERS_RE.sub("", t)
 
 def obtener_insumos_documento(ruta_pdf):
@@ -159,21 +131,20 @@ def normalizar_fecha(fecha_str, anio_defecto=""):
     return fecha_str
 
 PROMPT_AUDITORIA = """
-Eres un auditor archivístico experto. Transcribe con fidelidad absoluta los datos de esta carta formal.
-PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE".
+Eres un auditor archivístico experto de correspondencia contractual.
+Transcribe con fidelidad absoluta los datos de este documento formal.
 
-REGLAS DE EXTRACCIÓN:
-1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
-2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, su nombre completo.
-4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
+REGLAS OBLIGATORIAS:
+1. "RAZON_SOCIAL_REMITENTE": Quién emite la carta (Mira el logo principal o membrete superior).
+   - ATENCIÓN: Si ves un sello azul que dice "CONSORCIO 4C - RECIBIDO", ese sello es de RECEPCIÓN, NO es el remitente. El remitente es quien tiene el logo (ej. ANI, Concesión Alto Magdalena).
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. Radicado ANI 2021305..., Radicado Concesión ALMA-2021...). NUNCA pongas el número de radicado interno del sello de Consorcio 4C (CI.004/GP...).
+3. "RAZON_SOCIAL_DESTINATARIO": A quién va dirigida la carta formalmente.
+4. "NO_RADICADO_DESTINATARIO": Radicado de recibido (Sticker de Consorcio 4C GP-XXXXX o sticker de barras).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
-6. "ASUNTO" (SIGUE ESTAS 3 REGLAS ESTRICTAS):
-   - CASO 1 (Cartas con bloque de Ref.): Transcribe TODO el bloque comenzando con 'Ref. ' y uniendo todas las líneas con guiones. NUNCA transcribas párrafos del cuerpo de la carta ni códigos de barras ni leyendas de stickers.
-     Ejemplo: "Ref. Contrato de Concesión 003 de 2014 - Concesión Honda – Girardot – Puerto Salgar - Seguridad Vial Pasos Zonas Escolares - Respuesta ALMA-2017-3700"
-   - CASO 2 (Cartas con carátula de la ANI): Ignora la carátula con nombre técnico (CI004_...). Transcribe todo el bloque de la carta real comenzando con 'Ref. '.
-   - CASO 3 (Cartas con REFERENCIA y ASUNTO separados): Ignora la REFERENCIA. Transcribe ÚNICAMENTE lo que dice después de 'ASUNTO:'. NUNCA incluyas corchetes '[', ']' ni la palabra 'ASUNTO:'.
-     Ejemplo: "Entrega de un (1) expediente predial de la Unidad Funcional 3, para aprobación de Ficha Predial."
+6. "ASUNTO": Transcribe como una FIEL COPIA el texto del Asunto o Referencia:
+   - Si la carta dice "ASUNTO: [texto]", transcribe ÚNICAMENTE el texto posterior a los dos puntos. NUNCA le agregues "Ref.".
+   - Si la carta tiene bloque formal con "Ref. Contrato...", escribe exactamente eso.
+   - PROHIBIDO transcribir códigos de barras, sellos o nombres de archivos técnicos (ej. "CI004_...").
 
 DEVOLVER OBLIGATORIAMENTE UN JSON VÁLIDO:
 {
@@ -274,47 +245,56 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     es_recibida = tipo_flujo == "RECIBIDAS"
 
     if es_recibida:
+        # 1. DESTINATARIO EN RECIBIDAS ES SIEMPRE CONSORCIO 4C
         ia_dest = "CONSORCIO 4C"
 
+        # 2. REMITENTE EN RECIBIDAS JAMÁS PUEDE SER CONSORCIO 4C
+        if "CONSORCIO 4C" in ia_rem.upper():
+            ia_rem = ""
+
+        # Deducir el remitente real si fue confundido con el sello
+        if not ia_rem:
+            if "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
+                ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
+            elif "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower() or "alma" in texto_completo.lower():
+                ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
+            elif "fiduciaria bogot" in texto_completo.lower():
+                ia_rem = "FIDUCIARIA BOGOTÁ"
+            else:
+                ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
+
+        # 3. RADICADO DESTINATARIO EN RECIBIDAS ES EL GP DE CONSORCIO 4C
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
-        elif not rad_dest.startswith("GP-"):
-            m_gp_txt = re.search(r'GP[-_\s]?(\d{3,6})', texto_completo, re.IGNORECASE)
-            rad_dest = f"GP-{m_gp_txt.group(1)}" if m_gp_txt else ""
 
-        if rad_rem and ("ALMA-3-" in rad_rem or not re.search(r'ALMA[-\s]?20\d{2}', rad_rem, re.IGNORECASE)):
-            if "ALMA" in rad_rem: rad_rem = ""
+        # 4. RADICADO REMITENTE EN RECIBIDAS NUNCA PUEDE SER GP NI CI.004
+        if rad_rem.startswith("GP-") or "CI.004" in rad_rem or "CI004" in rad_rem:
+            rad_rem = ""
 
-        if not rad_rem or rad_rem.startswith("GP-"):
-            m_alma_oficial = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
-            m_ani = re.search(r'\b(20\d{2}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)\b', texto_completo)
-            m_car = re.search(r'\b(0\d{10})\b', texto_completo)
+        if not rad_rem:
+            m_ani_rad = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*|Rad\s*No\.?\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
+            m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
+            m_ani_nom = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
+            m_con_nom = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
 
-            if m_alma_oficial:
-                rad_rem = m_alma_oficial.group(1).replace(' ', '-')
-            elif m_ani:
-                rad_rem = m_ani.group(1).replace(' ', '')
-            elif m_car:
-                rad_rem = m_car.group(1)
-            else:
-                m_con = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
-                m_ani_nom = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
-                anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2017"
-                if m_con:
-                    rad_rem = f"ALMA-{anio_doc}-{m_con.group(1)}"
-                elif m_ani_nom:
-                    rad_rem = f"ANI-{m_ani_nom.group(1)}"
+            if m_ani_rad:
+                rad_rem = m_ani_rad.group(1).replace(' ', '')
+            elif m_alma_txt:
+                rad_rem = m_alma_txt.group(1).replace(' ', '-')
+            elif m_ani_nom:
+                rad_rem = f"ANI-{m_ani_nom.group(1)}"
+            elif m_con_nom:
+                anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2021"
+                rad_rem = f"ALMA-{anio_doc}-{m_con_nom.group(1)}"
 
-        if not ia_rem:
-            if "ALMA" in rad_rem or "CON_" in nombre_archivo:
-                ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
-            elif "ANI" in rad_rem or "ANI_" in nombre_archivo:
-                ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA – ANI"
-            elif "fiduciaria bogot" in texto_completo.lower():
-                ia_rem = "FIDUCIARIA BOGOTÁ"
     else:
+        # RADICADAS: REMITENTE SIEMPRE CONSORCIO 4C
         ia_rem = "CONSORCIO 4C"
+
+        # DESTINATARIO JAMÁS PUEDE SER CONSORCIO 4C
+        if "CONSORCIO 4C" in ia_dest.upper():
+            ia_dest = ""
 
         m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo, re.IGNORECASE)
         if m_nom:
@@ -343,12 +323,11 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
                 if m_nom_arch:
                     ia_dest = m_nom_arch.group(1).replace('_', ' ').strip()
             elif "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
-                ia_dest = "AGENCIA NACIONAL DE INFRAESTRUCTURA – ANI"
+                ia_dest = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    # Depuración de Asunto
-    asunto_final = depurar_ruido_asunto(ia_asunto, texto_completo)
+    asunto_final = limpiar_asunto_literal(ia_asunto, es_recibida=es_recibida)
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
@@ -413,15 +392,29 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=Fa
         if df.empty or "UBICACION_ARCHIVO" not in df.columns:
             return set(), 1
 
-        # Limpieza masiva de corchetes en memoria previa
+        # AUTOCORRECCIÓN INMEDIATA DE LA MEMORIA PREVIA
         for idx, row in df.iterrows():
-            asunto_original = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
-            asunto_limpio = depurar_ruido_asunto(asunto_original)
-            df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = asunto_limpio
+            ubic = str(row.get("UBICACION_ARCHIVO", "")).lower()
+            nom_arch = os.path.basename(ubic)
+            es_rec = "recibidas" in ubic
+            rem = str(row.get("RAZON SOCIAL REMITENTE", "")).strip()
+            asunto = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
+
+            if es_rec:
+                df.at[idx, "RAZON SOCIAL DESTINATARIO"] = "CONSORCIO 4C"
+                if "CONSORCIO 4C" in rem.upper() or not rem:
+                    if "ani_" in nom_arch.lower():
+                        df.at[idx, "RAZON SOCIAL REMITENTE"] = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
+                    elif "con_" in nom_arch.lower():
+                        df.at[idx, "RAZON SOCIAL REMITENTE"] = "CONCESIÓN ALTO MAGDALENA S.A.S."
+                
+                # Quitar Ref falso en recibidas
+                if asunto.lower().startswith("ref"):
+                    df.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = re.sub(r'^Ref\.?\s*', '', asunto, flags=re.IGNORECASE).strip()
 
         df.to_csv(ruta_memoria_final, index=False)
         procesados = set(os.path.basename(str(r).strip()).lower() for r in df["UBICACION_ARCHIVO"].dropna())
-        print(f"✅ Memoria previa desinfectada: {len(procesados)} cartas aseguradas.", flush=True)
+        print(f"✅ Memoria cargada y blindada: {len(procesados)} cartas sanas.", flush=True)
         return procesados, len(df) + 1
     except Exception as e:
         print(f"⚠️ Error cargando memoria: {e}", flush=True)
@@ -429,24 +422,24 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=Fa
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (PIXTRAL: EXTRACTOR LIMPIO Y DESINFECTADO)", flush=True)
+    print(" MOTOR RESTREPO_2 (PIXTRAL: BLINDAJE DE ENTIDADES Y ASUNTOS)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
-    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
+    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2021').strip()
 
     if es_prueba:
         limite = int(os.environ.get('LIMITE_PRUEBA', '1').strip())
         etiqueta = f"PRUEBA_{limite}_por_flujo"
         ruta_memoria = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria_PRUEBA.csv')
         ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
-        print(f"🧪 MODO PRUEBA: {limite} archivo(s) por flujo. Memoria de producción aislada.", flush=True)
+        print(f"🧪 MODO PRUEBA: {limite} archivo(s) por flujo. Memoria aislada.", flush=True)
     else:
         limite = None
         etiqueta = f"{carpeta_objetivo}"
         ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
         ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
-        print(f"🚀 MODO PRODUCCIÓN: Procesando año {carpeta_objetivo} con memoria persistente.", flush=True)
+        print(f"🚀 MODO PRODUCCIÓN: Procesando {carpeta_objetivo} con blindaje total.", flush=True)
 
     procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria, es_prueba=es_prueba)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
@@ -465,10 +458,10 @@ def procesar_archivos():
         pendientes = [x for x in archivos if os.path.basename(x[0]).lower() not in procesados_basenames]
 
         if not pendientes:
-            print(f"✅ Todas las cartas de {tipo} ya están en memoria.", flush=True)
+            print(f"✅ Todas las cartas de {tipo} ya están limpias y en memoria.", flush=True)
             continue
 
-        print(f"\n📂 Tabulando {len(pendientes)} cartas pendientes/reparadas en {tipo}...", flush=True)
+        print(f"\n📂 Re-tabulando {len(pendientes)} cartas pendientes/reparadas en {tipo}...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
@@ -499,11 +492,6 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
         try:
             df_final = pd.read_csv(ruta_memoria)
             if not df_final.empty:
-                # Limpieza final de corchetes y espacios antes de exportar
-                for idx, row in df_final.iterrows():
-                    asunto_orig = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
-                    df_final.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = depurar_ruido_asunto(asunto_orig)
-
                 es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
                 df_recibidas = df_final[es_recibida].copy()
                 df_radicadas = df_final[~es_recibida].copy()
@@ -520,7 +508,7 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
                     df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
                     df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
 
-                print(f"\n✅ EXCEL DESINFECTADO Y GENERADO:")
+                print(f"\n✅ EXCEL BLINDADO GENERADO:")
                 print(f"   📑 'Recibidas': {len(df_recibidas)} cartas | 'Radicadas': {len(df_radicadas)} cartas")
         except Exception as e:
             print(f"⚠️ Error al crear Excel: {e}", flush=True)
@@ -532,13 +520,13 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
 
     try:
         msg = EmailMessage()
-        msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel Desinfectado con 2 Hojas'
+        msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel Blindado y Corregido'
         msg['From'] = EMAIL_REMITENTE
         msg['To'] = EMAIL_DESTINO
         msg.set_content(
             f'Hola,\n\n'
-            f'El proceso de tabulación y desinfección con Mistral Pixtral ha finalizado exitosamente para {etiqueta}.\n\n'
-            f'Se adjunta el archivo Excel final completamente limpio de ruido ("Recibidas" y "Radicadas").\n\n'
+            f'El proceso de tabulación con Mistral Pixtral ha finalizado exitosamente para {etiqueta}.\n\n'
+            f'Se adjunta el archivo Excel corregido con el control estricto de entidades y asuntos ("Recibidas" y "Radicadas").\n\n'
             f'Saludos cordiales.'
         )
 
