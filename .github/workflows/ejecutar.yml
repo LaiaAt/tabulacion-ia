@@ -11,7 +11,7 @@ on:
           - 'si'
         default: 'no'
       limite_prueba:
-        description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO (Enviadas y Recibidas)?'
+        description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO?'
         required: false
         default: '1'
       carpeta_objetivo:
@@ -61,7 +61,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Inteligente
+      - name: Depuración de Memoria y Descarga Quirúrgica
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -75,11 +75,12 @@ jobs:
           fi
 
           python -c "
-          import os, random
+          import os, re, random, pandas as pd
 
           es_prueba = '${{ inputs.es_prueba }}'.strip().lower() in ['si', 's', 'true']
           limite = int('${{ inputs.limite_prueba }}' or '1')
           carpeta = '${{ inputs.carpeta_objetivo }}'
+          reiniciar = '${{ inputs.reiniciar_memoria }}'.strip().lower() in ['si', 's', 'true']
 
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
@@ -91,20 +92,33 @@ jobs:
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
-              print(f'📂 MODO PRODUCCIÓN: Evaluando memoria previa de {carpeta}...')
+              archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
               buenos = set()
-              archivos_mem = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
-              if archivos_mem:
-                  import pandas as pd
-                  dfs = [pd.read_csv(f) for f in archivos_mem if os.path.getsize(f) > 0]
-                  if dfs:
-                      df = pd.concat(dfs, ignore_index=True)
-                      for r in df['UBICACION_ARCHIVO'].dropna():
-                          buenos.add(os.path.basename(str(r).strip()).lower())
+
+              if os.path.exists(archivo_mem) and not reiniciar and os.path.getsize(archivo_mem) > 0:
+                  df = pd.read_csv(archivo_mem)
+                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
+
+                  # DETECTOR QUIRÚRGICO DE RUIDO HEREDADO DE GEMINI
+                  patron_ruido = r'recibido no|impl?i?ca aceptac|ALMA-R-2017|Calle 13|Calle 30|Bodega Sur|Girardot\s*[-–]\s*CND|111\s*1|I\s*II\s*III|U\s*II\s*l|004_\d+|CI004_'
+                  es_ruido = asunto_str.str.contains(patron_ruido, case=False, regex=True, na=False)
+                  es_gigante = asunto_str.str.len() > 180
+                  es_invalido = asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+
+                  malos = es_ruido | es_gigante | es_invalido
+                  df_sano = df[~malos].copy()
+
+                  print(f'🧹 Purga de Memoria de {carpeta}:')
+                  print(f'   - Cartas 100% limpias conservadas: {len(df_sano)}')
+                  print(f'   - Cartas con ruido de Gemini descartadas para re-tabular con Pixtral: {malos.sum()}')
+
+                  df_sano.to_csv(archivo_mem, index=False)
+                  for r in df_sano['UBICACION_ARCHIVO'].dropna():
+                      buenos.add(os.path.basename(str(r).strip()).lower())
+
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
-              print(f'   - Ya tabuladas en memoria: {len(buenos)}')
-              print(f'   - Faltantes a descargar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
+              print(f'🚀 A descargar y procesar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
@@ -134,7 +148,7 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
+            git commit -m "Checkpoint memoria depurada automático [skip ci]" || echo "Sin cambios"
             git push origin main || true
           else
             echo "🧪 Modo prueba: Memoria del repositorio no modificada."
