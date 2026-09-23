@@ -41,12 +41,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Instalar librerías de Python
+      - name: Instalar librerías de Python (Mistral + Groq + Motor)
         run: |
-          pip install pymupdf google-genai pandas openpyxl requests Pillow
+          pip install --upgrade pip
+          pip install pymupdf mistralai groq pandas openpyxl requests Pillow
 
       - name: Instalar conector de Google Drive (rclone)
-        run: sudo apt-get install rclone
+        run: sudo apt-get install -y rclone
 
       - name: Configurar acceso a Google Drive
         run: |
@@ -60,10 +61,12 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Reparadora (Incluye todas las Enviadas)
+      - name: Descarga Quirúrgica de Archivos desde Drive
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
-          echo "Consultando archivos en Drive para: $CARPETA"
+          ES_PRUEBA="${{ inputs.es_prueba }}"
+          LIMITE="${{ inputs.limite_prueba }}"
+          echo "Consultando archivos en Drive para: $CARPETA (Modo prueba: $ES_PRUEBA)"
 
           if [ "$CARPETA" = "todo" ]; then
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
@@ -74,72 +77,48 @@ jobs:
           fi
 
           python -c "
-          import os, re, pandas as pd
+          import os, random, pandas as pd
 
+          es_prueba = '${{ inputs.es_prueba }}' == 'si'
           carpeta = '${{ inputs.carpeta_objetivo }}'
-          es_prueba = '${{ inputs.es_prueba }}'
+          limite = int('${{ inputs.limite_prueba }}' or '5')
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
-          archivo_unificado = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
-
-          archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
-          buenos_filenames = set()
-
-          if archivos_memoria and not reiniciar and es_prueba != 'si':
-              dfs = []
-              for f_mem in archivos_memoria:
-                  try:
-                      d = pd.read_csv(f_mem)
-                      if not d.empty and 'UBICACION_ARCHIVO' in d.columns:
-                          dfs.append(d)
-                  except Exception:
-                      pass
-
-              if dfs:
-                  df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
-
-                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
-                  rad_rem_str = df['No. RADICADO REMITENTE'].fillna('').astype(str)
-                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
-                  es_radicada = ~df['UBICACION_ARCHIVO'].str.contains('Recibidas', case=False, na=False)
-
-                  # MARCAR COMO DEFECTUOSA CUALQUIER FILA CON CI004_ EN EL ASUNTO
-                  malos = (
-                      df.astype(str).apply(lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)).any(axis=1) |
-                      asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-                      asunto_str.str.contains('CI004_', case=False, na=False) |
-                      asunto_str.str.contains('Delivery Status|mailbox unavailable', case=False, na=False) |
-                      df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
-                      (es_radicada & ~rad_rem_str.str.contains('CI\.?004', regex=True, case=False)) |
-                      (es_radicada & rad_dest_str.str.strip().isin(['', 'nan', 'None']))
-                  )
-
-                  df_bueno = df[~malos]
-                  df_bueno.to_csv(archivo_unificado, index=False)
-
-                  print(f'✅ Cartas con datos 100% reales conservadas: {len(df_bueno)}')
-                  print(f'🎯 Cartas con CI004_ o incompletas que serán re-descargadas y tabuladas: {malos.sum()}')
-
-                  for ruta in df_bueno['UBICACION_ARCHIVO'].dropna():
-                      buenos_filenames.add(os.path.basename(str(ruta).strip()).lower())
 
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
               todos_rec = [line.strip() for line in f if line.strip()]
 
-          descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos_filenames]
-          descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos_filenames]
+          if es_prueba:
+              # MODO PRUEBA: IGNORAR COMPLETAMENTE LA MEMORIA
+              print('🧪 MODO PRUEBA ACTIVO: No se lee memoria previa. Selección pura al azar.')
+              descargar_env = random.sample(todos_env, min(len(todos_env), limite))
+              descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite))
+          else:
+              # MODO PRODUCCIÓN: FILTRAR CON LA MEMORIA EXISTENTE
+              buenos_filenames = set()
+              archivo_unificado = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+              archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
 
-          if es_prueba == 'si':
-              import random
-              limite = int('${{ inputs.limite_prueba }}' or '5')
-              descargar_env = random.sample(descargar_env, min(len(descargar_env), limite))
-              descargar_rec = random.sample(descargar_rec, min(len(descargar_rec), limite))
+              if archivos_memoria and not reiniciar:
+                  dfs = [pd.read_csv(f) for f in archivos_memoria if os.path.getsize(f) > 0]
+                  if dfs:
+                      df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=['UBICACION_ARCHIVO'])
+                      asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
+                      malos = (
+                          df.astype(str).apply(lambda col: col.str.contains('CONSTATADO|SIN RADICADO', case=False, na=False)).any(axis=1) |
+                          asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan']) |
+                          asunto_str.str.contains('CI004_|Delivery Status', case=False, na=False) |
+                          df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                      )
+                      df_bueno = df[~malos]
+                      for r in df_bueno['UBICACION_ARCHIVO'].dropna():
+                          buenos_filenames.add(os.path.basename(str(r).strip()).lower())
 
-          print(f'\n🚀 DESCARGA QUIRÚRGICA:')
-          print(f'   - Enviadas/Radicadas a descargar (todas las que faltaban): {len(descargar_env)}')
-          print(f'   - Recibidas a descargar: {len(descargar_rec)}')
+              descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos_filenames]
+              descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos_filenames]
 
+          print(f'🚀 A descargar -> Enviadas: {len(descargar_env)} | Recibidas: {len(descargar_rec)}')
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
           with open('descargar_recibidas.txt', 'w') as f:
@@ -149,23 +128,28 @@ jobs:
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación
+      - name: Ejecutar la IA de Tabulación Híbrida (Mistral + Groq)
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
           REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      - name: Guardar Checkpoint de Memoria en GitHub
+      - name: Guardar Checkpoint de Memoria en GitHub (Solo si no es prueba)
         if: always()
         run: |
-          git config --global user.name "Bot-Memoria"
-          git config --global user.email "bot@github.com"
-          git pull --rebase origin main || true
-          git add RESTREPO_2_IA_memoria_*.csv || true
-          git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
-          git push origin main || true
+          if [ "${{ inputs.es_prueba }}" != "si" ]; then
+            git config --global user.name "Bot-Memoria"
+            git config --global user.email "bot@github.com"
+            git pull --rebase origin main || true
+            git add RESTREPO_2_IA_memoria_*.csv || true
+            git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
+            git push origin main || true
+          else
+            echo "🧪 Ejecución de prueba finalizada: no se modifica la memoria en el repositorio."
+          fi
