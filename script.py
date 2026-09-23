@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (GEMINI FLASH REAL + MISTRAL PIXTRAL)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (EXCLUSIVO MISTRAL PIXTRAL)
 # ==============================================================================
 
 import os
@@ -7,7 +7,6 @@ import sys
 import time
 import json
 import re
-import random
 import base64
 import smtplib
 import threading
@@ -25,41 +24,20 @@ import pymupdf as fitz
 from PIL import Image
 import io
 
-print("⏳ [1/3] Inicializando Motores de Inteligencia Artificial...", flush=True)
+print("⏳ [1/2] Verificando clave de Mistral AI...", flush=True)
 
-# 1. CONFIGURACIÓN GEMINI (GOOGLE AI STUDIO)
-gemini_clients = []
-raw_gemini = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
-gemini_keys = [k.strip() for k in raw_gemini.replace('\n', ',').split(',') if len(k.strip()) > 10]
-
-if gemini_keys:
-    try:
-        from google import genai
-        from google.genai import types
-        for i, gk in enumerate(gemini_keys, 1):
-            c = genai.Client(api_key=gk, http_options=types.HttpOptions(timeout=25_000))
-            gemini_clients.append((f"Gemini-Key-{i}", c))
-        print(f"   ✅ Google Gemini configurado con {len(gemini_clients)} clave(s).", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ Error inicializando Gemini: {e}", flush=True)
-
-# 2. CONFIGURACIÓN MISTRAL AI
 mistral_key = os.environ.get('MISTRAL_API_KEY', '').strip()
-if len(mistral_key) > 10:
-    print("   ✅ Mistral AI listo (vía API directa).", flush=True)
-
-if not gemini_clients and len(mistral_key) <= 10:
-    print("❌ ERROR CRÍTICO: No se detectó ninguna API Key válida.", flush=True)
+if len(mistral_key) <= 10:
+    print("❌ ERROR CRÍTICO: No se detectó MISTRAL_API_KEY en los secretos.", flush=True)
     sys.exit(1)
 
-# MODELOS SOLICITADOS OFICIALMENTE POR LA API
-MODELOS_GEMINI = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-2.5-flash"
+print("   ✅ Motor Pixtral conectado y listo.", flush=True)
+
+# MODELOS EXCLUSIVOS PIXTRAL
+MODELOS_PIXTRAL = [
+    "pixtral-12b-2409",      # Modelo principal rápido de visión
+    "pixtral-large-latest"   # Modelo avanzado de visión de alta precisión
 ]
-MODELOS_MISTRAL = ["pixtral-12b-2409", "mistral-small-latest"]
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -70,7 +48,6 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
-evento_cuota_agotada = threading.Event()
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
     try:
@@ -102,7 +79,7 @@ def obtener_insumos_documento(ruta_pdf):
         total_paginas = len(doc)
         if total_paginas == 0:
             doc.close()
-            return None, None, "", "", 0
+            return None, "", "", 0
 
         texto_completo_pdf = ""
         for p in doc: texto_completo_pdf += p.get_text() + "\n"
@@ -122,22 +99,22 @@ def obtener_insumos_documento(ruta_pdf):
             texto_para_ia = texto_pag1
 
         pagina = doc[num_pag_imagen]
-        pix = pagina.get_pixmap(dpi=140)
+        pix = pagina.get_pixmap(dpi=130)
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
 
-        if img.width > 1200:
-            ratio = 1200 / float(img.width)
-            img = img.resize((1200, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+        if img.width > 1100:
+            ratio = 1100 / float(img.width)
+            img = img.resize((1100, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
 
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=80, optimize=True)
+        img.save(buffer, format="JPEG", quality=75, optimize=True)
         img_bytes = buffer.getvalue()
         b64_str = base64.b64encode(img_bytes).decode('utf-8')
         doc.close()
-        return b64_str, img_bytes, texto_completo_pdf, texto_para_ia, total_paginas
+        return b64_str, texto_completo_pdf, texto_para_ia, total_paginas
     except Exception as e:
         print(f"⚠️ Error leyendo PDF {ruta_pdf}: {e}", flush=True)
-        return None, None, "", "", 0
+        return None, "", "", 0
 
 def normalizar_fecha(fecha_str, anio_defecto=""):
     if not fecha_str or str(fecha_str).strip() in ["N/A", "None", "", "01/01/2017"]:
@@ -191,70 +168,50 @@ def parsear_json(texto):
     except Exception:
         return None
 
-# ==============================================================================
-# CONSULTA DE IA (GEMINI ACTUALIZADO CON RELEVO A MISTRAL VÍA API)
-# ==============================================================================
-def consultar_ia_robusta(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo):
-    if not b64_img or evento_cuota_agotada.is_set():
-        return None, "", ""
+def consultar_pixtral(b64_img, texto_digital, nombre_archivo, tipo_flujo):
+    if not b64_img:
+        return None, ""
 
-    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2500]}"
+    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2200]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
 
-    # 1. INTENTO CON GOOGLE GEMINI (MODELOS VIGENTES)
-    if gemini_clients and img_bytes:
-        from google.genai import types
-        part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
-        for nombre_key, client in gemini_clients:
-            for mod in MODELOS_GEMINI:
-                try:
-                    r = client.models.generate_content(
-                        model=mod,
-                        contents=[part_img, prompt_final],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
-                    )
-                    d = parsear_json(r.text)
-                    if d and isinstance(d, dict) and any(d.values()):
-                        return d, "Gemini", mod
-                except Exception as e:
-                    # Si falla, se muestra el motivo exacto y prueba el siguiente
-                    print(f"      ℹ️ [{nombre_key} | {mod}]: {e}", flush=True)
+    headers = {
+        "Authorization": f"Bearer {mistral_key}",
+        "Content-Type": "application/json"
+    }
 
-    # 2. INTENTO DE RELEVO CON MISTRAL AI (LLAMADA DIRECTA HTTP)
-    if len(mistral_key) > 10:
-        headers = {
-            "Authorization": f"Bearer {mistral_key}",
-            "Content-Type": "application/json"
-        }
-        for mod in MODELOS_MISTRAL:
-            try:
-                payload = {
-                    "model": mod,
-                    "temperature": 0.0,
-                    "response_format": {"type": "json_object"},
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_final},
-                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_img}"}
-                            ]
-                        }
-                    ]
-                }
-                resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=40)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    contenido = data["choices"][0]["message"]["content"]
-                    d = parsear_json(contenido)
-                    if d and isinstance(d, dict) and any(d.values()):
-                        return d, "Mistral", mod
-                else:
-                    print(f"      ℹ️ [Mistral {mod} HTTP {resp.status_code}]: {resp.text[:150]}", flush=True)
-            except Exception as e:
-                print(f"      ℹ️ [Fallo Mistral {mod}]: {e}", flush=True)
+    for mod in MODELOS_PIXTRAL:
+        try:
+            payload = {
+                "model": mod,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_final},
+                            {
+                                "type": "image_url",
+                                "image_url": f"data:image/jpeg;base64,{b64_img}"
+                            }
+                        ]
+                    }
+                ]
+            }
+            resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=45)
+            if resp.status_code == 200:
+                data = resp.json()
+                contenido = data["choices"][0]["message"]["content"]
+                d = parsear_json(contenido)
+                if d and isinstance(d, dict) and any(d.values()):
+                    return d, mod
+            else:
+                print(f"      ℹ️ [Pixtral {mod} HTTP {resp.status_code}]: {resp.text[:130]}", flush=True)
+        except Exception as e:
+            print(f"      ℹ️ [Fallo Pixtral {mod}]: {e}", flush=True)
 
-    return None, "", ""
+    return None, ""
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
@@ -366,18 +323,19 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     t_inicio = time.time()
     ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
-    b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
+    b64_img, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     if not b64_img:
         return False
 
-    datos, proveedor, mod_usado = consultar_ia_robusta(b64_img, img_bytes, txt1, pdf, tipo)
+    datos, mod_usado = consultar_pixtral(b64_img, txt1, pdf, tipo)
 
     if datos is None:
-        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf}.", flush=True)
+        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf} con Pixtral.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
 
+    # El producto NO contiene columnas técnicas
     fila = {
         "ÍTEM": item_num,
         "DEL FOLIO/PAGINAS": paginas,
@@ -394,12 +352,13 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    print(f"📄 [Hilo-{hilo_id} | {proveedor}: {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
+    # Solo el log de consola muestra el modelo de Pixtral usado
+    print(f"📄 [Hilo-{hilo_id} | Pixtral: {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (CON RESALTO DE ERRORES Y CONTROL DE FLUJO)", flush=True)
+    print(" MOTOR RESTREPO_2 (SISTEMA EXCLUSIVO PIXTRAL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'si').strip().lower() in ['si', 's', 'true']
@@ -408,11 +367,12 @@ def procesar_archivos():
     if es_prueba:
         limite = int(os.environ.get('LIMITE_PRUEBA', '1').strip())
         etiqueta = f"PRUEBA_{limite}_archivos"
+        # Memoria y Excel aislados en prueba (NO lee ni altera la producción)
         ruta_memoria = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria_PRUEBA.csv')
         ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
         if os.path.exists(ruta_memoria): os.remove(ruta_memoria)
         if os.path.exists(ruta_excel): os.remove(ruta_excel)
-        print(f"🧪 MODO PRUEBA ACTIVO: Límite estricto de {limite} archivo(s). Sin memoria previa.", flush=True)
+        print(f"🧪 MODO PRUEBA ACTIVO: Se tabularán únicamente {limite} archivo(s). Memoria de producción intacta.", flush=True)
     else:
         limite = None
         etiqueta = f"{carpeta_objetivo}"
@@ -436,7 +396,7 @@ def procesar_archivos():
         if not archivos:
             continue
 
-        print(f"\n📂 Procesando {len(archivos)} carta(s) encontrada(s) en {tipo}...", flush=True)
+        print(f"\n📂 Procesando {len(archivos)} carta(s) en {tipo}...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
