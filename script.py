@@ -62,11 +62,11 @@ lock_csv = threading.Lock()
 lock_key = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
-# Diccionario para controlar el enfriamiento de 24 horas por clave
+# Diccionario para controlar el enfriamiento por clave
 key_cooldowns = {nombre: 0.0 for nombre, _ in gemini_clients}
 
 # ==============================================================================
-# LISTADO DE TODOS LOS MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
+# LISTADO DE MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
 # ==============================================================================
 MODELOS_FASE_TURBO = [
     "gemini-3.5-flash-lite",
@@ -205,6 +205,15 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
     total_keys = len(gemini_clients)
     start_idx = (item_num + hilo_id) % total_keys
 
+    # Chequeo rápido si ya todas las claves están fuera de servicio
+    with lock_key:
+        now = time.time()
+        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
+            if not evento_cuota_agotada.is_set():
+                print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. 🚨", flush=True)
+                evento_cuota_agotada.set()
+            return None, "", ""
+
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None, "", ""
@@ -212,12 +221,13 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         idx = (start_idx + intento) % total_keys
         nombre_key, client = gemini_clients[idx]
 
-        # Verificar si la API completa está en castigo de 24 horas
+        # Verificar si la clave está en enfriamiento o muerta
         with lock_key:
             if key_cooldowns.get(nombre_key, 0) > time.time():
                 continue
 
         exito_en_algun_modelo = False
+        clave_invalida = False
 
         # EXPRIMIR TODOS LOS MODELOS EN ESTA API
         for mod in MODELOS_FASE_TURBO:
@@ -232,28 +242,29 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             except Exception as e:
                 err = str(e).upper()
                 if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    print(f"      ⚠️ {nombre_key} ({mod}) saturado. Explotando el siguiente modelo...", flush=True)
-                    time.sleep(0.5)
-                    continue  # Continúa al siguiente MODELO en la misma API
+                    time.sleep(0.3)
+                    continue  # Continúa al siguiente modelo
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
-                    exito_en_algun_modelo = True # Hack para salir del loop de modelos
+                    print(f"      ❌ {nombre_key} rechazada por Google (401/403). Se descarta permanentemente.", flush=True)
+                    clave_invalida = True
                     break
                 else:
                     continue
 
-        if not exito_en_algun_modelo:
-            # Si llegó aquí es porque TODOS los modelos de esta API fallaron. Castigo de 24 horas.
-            with lock_key:
-                print(f"      🔴 {nombre_key} agotó TODOS sus modelos. Aplicando enfriamiento de 24 HORAS.", flush=True)
-                key_cooldowns[nombre_key] = time.time() + 86400  # 86400 segundos = 24 horas
+        with lock_key:
+            if clave_invalida:
+                key_cooldowns[nombre_key] = time.time() + (86400 * 365)  # Descarte permanente
+            elif not exito_en_algun_modelo:
+                print(f"      🔴 {nombre_key} agotó todos sus modelos. Enfriamiento de 24h.", flush=True)
+                key_cooldowns[nombre_key] = time.time() + 86400
 
-    # Si sale del ciclo for, significa que TODAS las APIs entraron en castigo de 24h
+    # Verificar nuevamente si después de este intento todas las claves quedaron inutilizables
     with lock_key:
         now = time.time()
-        if all(c > now for c in key_cooldowns.values()):
-            print("\n🚨 TODAS LAS CLAVES AGOTARON TODOS SUS MODELOS. DETENIENDO EL PROGRAMA. 🚨", flush=True)
-            evento_cuota_agotada.set()
+        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
+            if not evento_cuota_agotada.is_set():
+                print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. DETENIENDO EL PROGRAMA. 🚨", flush=True)
+                evento_cuota_agotada.set()
 
     return None, "", ""
 
@@ -471,8 +482,7 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
     b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
     datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
 
-    if datos is None and not evento_cuota_agotada.is_set():
-        # Si todos los modelos rápidos fallaron, no lo guardamos en esta fase, la Fase 2 lo atrapará
+    if datos is None:
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -559,6 +569,8 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
             if key_cooldowns.get(nombre_key, 0) > time.time():
                 continue
 
+        clave_invalida = False
+
         for mod in MODELOS_AUDITORES:
             try:
                 r = client.models.generate_content(
@@ -571,17 +583,21 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
                     return d
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA"]):
-                    print(f"      🔴 {nombre_key} ({mod}) sin cuota. Probando siguiente...", flush=True)
-                    time.sleep(0.5)
+                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                    time.sleep(0.3)
                     continue
                 elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
+                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
+                    clave_invalida = True
                     break
                 else:
                     continue
 
         with lock_key:
-            key_cooldowns[nombre_key] = time.time() + 86400
+            if clave_invalida:
+                key_cooldowns[nombre_key] = time.time() + (86400 * 365)
+            else:
+                key_cooldowns[nombre_key] = time.time() + 86400
 
     return None
 
@@ -739,7 +755,8 @@ def procesar_archivos():
                 item_counter += 1
 
             for f in as_completed(futuros):
-                pass
+                if evento_cuota_agotada.is_set():
+                    break
 
     if not evento_cuota_agotada.is_set():
         auditar_y_corregir_tabla_final(ruta_memoria)
@@ -749,7 +766,7 @@ def procesar_archivos():
     if evento_cuota_agotada.is_set():
         print("\n📧 Enviando correo de ALERTA al dueño...", flush=True)
         enviar_correo_alerta_cuota(ruta_excel, etiqueta)
-        print("🛑 Programa detenido de forma segura.", flush=True)
+        print("🛑 Programa pausado de forma segura por falta de cuota.", flush=True)
         sys.exit(0)
     else:
         print("\n📧 Enviando correo de ÉXITO al dueño...", flush=True)
@@ -796,10 +813,9 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
     msg.set_content(
         f'Hola Eduardo,\n\n'
         f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
-        f'Todas las claves agotaron todos sus modelos y entraron en enfriamiento de 24 horas.\n\n'
-        f'Por favor, renueva las APIs o espera 24 horas para continuar.\n\n'
-        f'TU AVANCE ESTÁ A SALVO: Cuando vuelvas a ejecutarlo, reanudará exactamente donde se quedó.\n\n'
-        f'Adjunto el Excel con el avance procesado en sus dos hojas.\n\n'
+        f'Todas las claves agotaron sus cuotas o entraron en enfriamiento.\n\n'
+        f'TU AVANCE ESTÁ A SALVO: Cuando renueves las API Keys o pase el enfriamiento, reanudará exactamente donde quedó sin repetir cartas.\n\n'
+        f'Adjunto el Excel con el avance procesado hasta este momento.\n\n'
         f'Saludos!'
     )
 
