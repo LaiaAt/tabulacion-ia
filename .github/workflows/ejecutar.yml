@@ -7,9 +7,9 @@ on:
         description: '¿Ejecución de prueba? (si/no)'
         type: choice
         options:
-          - 'si'
           - 'no'
-        default: 'si'
+          - 'si'
+        default: 'no'
       limite_prueba:
         description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO (Enviadas y Recibidas)?'
         required: false
@@ -61,7 +61,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Simétrica
+      - name: Descarga Quirúrgica Inteligente
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -87,11 +87,11 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
-              print(f'🧪 MODO PRUEBA: Seleccionando {limite} de Enviadas Y {limite} de Recibidas al azar.')
+              print(f'🧪 MODO PRUEBA: Descargando {limite} de Enviadas Y {limite} de Recibidas.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
-              # Modo producción normal
+              print(f'📂 MODO PRODUCCIÓN: Evaluando memoria previa de {carpeta}...')
               buenos = set()
               archivos_mem = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
               if archivos_mem:
@@ -103,8 +103,9 @@ jobs:
                           buenos.add(os.path.basename(str(r).strip()).lower())
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
+              print(f'   - Ya tabuladas en memoria: {len(buenos)}')
+              print(f'   - Faltantes a descargar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
-          print(f'🎯 Archivos listos para descargar -> Enviadas: {len(descargar_env)} | Recibidas: {len(descargar_rec)}')
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
           with open('descargar_recibidas.txt', 'w') as f:
@@ -125,7 +126,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      - name: Guardar Checkpoint de Memoria en GitHub (Solo en Producción)
+      - name: Guardar Checkpoint de Memoria en GitHub
         if: always()
         run: |
           if [ "${{ inputs.es_prueba }}" != "si" ]; then
@@ -136,5 +137,5 @@ jobs:
             git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
             git push origin main || true
           else
-            echo "🧪 Modo prueba: Memoria de producción protegida (sin escrituras)."
+            echo "🧪 Modo prueba: Memoria del repositorio no modificada."
           fi
