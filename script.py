@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (EXPRIMIDO TOTAL DE MODELOS + COOLDOWN 24H)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (MISTRAL / PIXTRAL + COOLDOWN 24H)
 # PRUEBA TODOS LOS MODELOS POR API | SI TODOS FALLAN -> ENFRIAMIENTO 24 HORAS
 # SI TODAS LAS APIS ESTÁN EN 24H -> DETIENE EL PROGRAMA Y ENVÍA ALERTA
 # ==============================================================================
@@ -26,29 +26,25 @@ if hasattr(sys.stdout, 'reconfigure'):
 import pymupdf as fitz
 from PIL import Image
 import io
-from google import genai
-from google.genai import types
+from mistralai import Mistral
 
-print("⏳ [1/3] Cargando Pool de Claves Gemini...", flush=True)
+print("⏳ [1/3] Cargando Pool de Claves Mistral...", flush=True)
 
-raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
+raw_keys = os.environ.get('MISTRAL_API_KEYS') or os.environ.get('MISTRAL_API_KEY') or ""
 lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
 
-gemini_clients = []
+mistral_clients = []
 for i, k in enumerate(lista_keys, 1):
     try:
-        c = genai.Client(
-            api_key=k,
-            http_options=types.HttpOptions(timeout=25_000)
-        )
-        gemini_clients.append((f"Key-{i}", c))
+        c = Mistral(api_key=k)
+        mistral_clients.append((f"Key-{i}", c))
     except Exception as e:
-        print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
+        print(f"⚠️ Error cargando clave Mistral #{i}: {e}", flush=True)
 
-if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas.", flush=True)
+if mistral_clients:
+    print(f"✅ Pool de Mistral activo con {len(mistral_clients)} claves listas.", flush=True)
 else:
-    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
+    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Mistral.", flush=True)
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -63,25 +59,21 @@ lock_key = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
 # Diccionario para controlar el enfriamiento por clave
-key_cooldowns = {nombre: 0.0 for nombre, _ in gemini_clients}
+key_cooldowns = {nombre: 0.0 for nombre, _ in mistral_clients}
 
 # ==============================================================================
-# LISTADO DE MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
+# LISTADO DE MODELOS MISTRAL CON VISIÓN DISPONIBLES
+# Verifica en tu cuenta cuáles siguen activos/gratis: console.mistral.ai
 # ==============================================================================
 MODELOS_FASE_TURBO = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash"
+    "pixtral-12b-2409",
+    "pixtral-large-latest",
+    "mistral-small-latest",
 ]
 
 MODELOS_AUDITORES = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash"
+    "pixtral-large-latest",
+    "mistral-small-latest",
 ]
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
@@ -172,7 +164,7 @@ REGLAS OBLIGATORIAS:
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
-JSON REQUERIDO:
+Responde ÚNICAMENTE con un JSON válido, sin texto adicional, con este formato exacto:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -195,20 +187,20 @@ def parsear_json(texto):
 # FASE 1: BARRIDO TURBO (EXPRIME TODOS LOS MODELOS ANTES DE DESCARTAR LA API)
 # ==============================================================================
 def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
-    if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
+    if not mistral_clients or not img_bytes or evento_cuota_agotada.is_set():
         return None, "", ""
 
     apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
-    part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+    data_url = f"data:image/jpeg;base64,{b64_img}"
 
-    total_keys = len(gemini_clients)
+    total_keys = len(mistral_clients)
     start_idx = (item_num + hilo_id) % total_keys
 
     # Chequeo rápido si ya todas las claves están fuera de servicio
     with lock_key:
         now = time.time()
-        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
+        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in mistral_clients):
             if not evento_cuota_agotada.is_set():
                 print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. 🚨", flush=True)
                 evento_cuota_agotada.set()
@@ -219,33 +211,43 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
             return None, "", ""
 
         idx = (start_idx + intento) % total_keys
-        nombre_key, client = gemini_clients[idx]
+        nombre_key, client = mistral_clients[idx]
 
         # Verificar si la clave está en enfriamiento o muerta
         with lock_key:
             if key_cooldowns.get(nombre_key, 0) > time.time():
                 continue
 
-        exito_en_algun_modelo = False
         clave_invalida = False
 
         # EXPRIMIR TODOS LOS MODELOS EN ESTA API
         for mod in MODELOS_FASE_TURBO:
             try:
-                r = client.models.generate_content(
-                    model=mod, contents=[part_img, prompt_final],
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                r = client.chat.complete(
+                    model=mod,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_final},
+                                {"type": "image_url", "image_url": data_url},
+                            ],
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
                 )
-                d = parsear_json(r.text)
+                texto_resp = r.choices[0].message.content
+                d = parsear_json(texto_resp)
                 if d and isinstance(d, dict) and any(d.values()):
                     return d, nombre_key, mod
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                if any(k in err for k in ["429", "RATE_LIMIT", "CAPACITY_EXCEEDED", "TOO_MANY_REQUESTS"]):
                     time.sleep(0.3)
                     continue  # Continúa al siguiente modelo
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google (401/403). Se descarta permanentemente.", flush=True)
+                elif any(k in err for k in ["401", "403", "UNAUTHORIZED", "INVALID_API_KEY", "PERMISSION"]):
+                    print(f"      ❌ {nombre_key} rechazada por Mistral (401/403). Se descarta permanentemente.", flush=True)
                     clave_invalida = True
                     break
                 else:
@@ -254,14 +256,14 @@ def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tip
         with lock_key:
             if clave_invalida:
                 key_cooldowns[nombre_key] = time.time() + (86400 * 365)  # Descarte permanente
-            elif not exito_en_algun_modelo:
+            else:
                 print(f"      🔴 {nombre_key} agotó todos sus modelos. Enfriamiento de 24h.", flush=True)
                 key_cooldowns[nombre_key] = time.time() + 86400
 
     # Verificar nuevamente si después de este intento todas las claves quedaron inutilizables
     with lock_key:
         now = time.time()
-        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
+        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in mistral_clients):
             if not evento_cuota_agotada.is_set():
                 print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. DETENIENDO EL PROGRAMA. 🚨", flush=True)
                 evento_cuota_agotada.set()
@@ -392,7 +394,7 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
 
 def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
-    
+
     if not archivos_memoria:
         return set(), 1
 
@@ -428,7 +430,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
             if not rad_dest.startswith("GP-") or rad_dest in ["nan", "None", ""]:
                 m_gp = re.search(r'GP[-_]?(\d{3,6})', nom_arch, re.IGNORECASE)
                 if m_gp: df.at[idx, "No. RADICADO DESTINATARIO"] = f"GP-{m_gp.group(1)}"
-            
+
             rad_rem = str(df.at[idx, "No. RADICADO REMITENTE"]).strip()
             if "ALMA-3-" in rad_rem or not rad_rem or rad_rem in ["nan", "None", ""]:
                 m_con = re.search(r'CON_(\d{3,5})', nom_arch, re.IGNORECASE)
@@ -514,7 +516,7 @@ Eres el Auditor Principal de Control de Calidad Archivística.
 Tu misión es inspeccionar esta fila que tiene celdas vacías o texto con ruido de escáner.
 Revisa el documento completo y devuelve el JSON con los datos PERFECTOS, FIELES Y LITERALES.
 
-JSON REQUERIDO:
+Responde ÚNICAMENTE con un JSON válido, sin texto adicional, con este formato exacto:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -526,13 +528,13 @@ JSON REQUERIDO:
 """
 
 def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_archivo, tipo_flujo, key_idx):
-    if not gemini_clients or evento_cuota_agotada.is_set():
+    if not mistral_clients or evento_cuota_agotada.is_set():
         return None
 
     try:
         doc = fitz.open(ruta_pdf)
         total_pags = len(doc)
-        partes = []
+        contenido = []
 
         for p_idx in range(min(total_pags, 2)):
             pix = doc[p_idx].get_pixmap(dpi=160)
@@ -542,8 +544,9 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
                 img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85, optimize=True)
-            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
-        
+            b64_pag = base64.b64encode(buf.getvalue()).decode('utf-8')
+            contenido.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_pag}"})
+
         doc.close()
     except Exception:
         return None
@@ -554,16 +557,16 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
         f"TEXTO ACTUAL AUDITADO: '{texto_actual}'\n"
         + PROMPT_AUDITORIA_CALIDAD_FINAL
     )
-    partes.append(prompt_auditor)
+    contenido.append({"type": "text", "text": prompt_auditor})
 
-    total_keys = len(gemini_clients)
+    total_keys = len(mistral_clients)
 
     for intento in range(total_keys):
         if evento_cuota_agotada.is_set():
             return None
 
         idx = (key_idx + intento) % total_keys
-        nombre_key, client = gemini_clients[idx]
+        nombre_key, client = mistral_clients[idx]
 
         with lock_key:
             if key_cooldowns.get(nombre_key, 0) > time.time():
@@ -573,21 +576,24 @@ def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_a
 
         for mod in MODELOS_AUDITORES:
             try:
-                r = client.models.generate_content(
-                    model=mod, contents=partes,
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                r = client.chat.complete(
+                    model=mod,
+                    messages=[{"role": "user", "content": contenido}],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
                 )
-                d = parsear_json(r.text)
+                texto_resp = r.choices[0].message.content
+                d = parsear_json(texto_resp)
                 if d and isinstance(d, dict) and any(d.values()):
                     print(f"      ✨ [AUDITORÍA FILA | {nombre_key} | {mod}] Datos corregidos y completados.", flush=True)
                     return d
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
+                if any(k in err for k in ["429", "RATE_LIMIT", "CAPACITY_EXCEEDED", "TOO_MANY_REQUESTS"]):
                     time.sleep(0.3)
                     continue
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
+                elif any(k in err for k in ["401", "403", "UNAUTHORIZED", "INVALID_API_KEY", "PERMISSION"]):
+                    print(f"      ❌ {nombre_key} rechazada por Mistral. Se descarta permanentemente.", flush=True)
                     clave_invalida = True
                     break
                 else:
@@ -621,7 +627,7 @@ def auditar_y_corregir_tabla_final(ruta_memoria):
     for idx, row in df_mem.iterrows():
         asunto_val = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
         tiene_vacios = any(not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None', 'NAN'] for col in columnas_evaluar)
-        
+
         tiene_ruido = bool(
             re.search(r'[\|!¡]{2,}', asunto_val) or
             re.search(r'ASUNTO:\s*$', asunto_val, re.IGNORECASE) or
@@ -688,7 +694,7 @@ def auditar_y_corregir_tabla_final(ruta_memoria):
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (EXPRIMIDO TOTAL + AUDITORÍA FINAL EXPERTA)", flush=True)
+    print(" MOTOR RESTREPO_2 (MISTRAL/PIXTRAL + AUDITORÍA FINAL EXPERTA)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
@@ -725,7 +731,7 @@ def procesar_archivos():
 
         print(f"\n📂 Buscando en: {tipo}...", flush=True)
         todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo)
-        
+
         pendientes = []
         for p, r, a in todos_los_pdfs:
             if os.path.basename(p).lower() not in procesados_basenames:
@@ -807,7 +813,7 @@ def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
         return
 
     msg = EmailMessage()
-    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
+    msg['Subject'] = f'🚨 ALERTA: Cuotas de Mistral Agotadas ({etiqueta}) - Proceso Pausado'
     msg['From'] = EMAIL_REMITENTE
     msg['To'] = EMAIL_DESTINO
     msg.set_content(
