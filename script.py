@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (PIXTRAL - CON REGLA ESTRICTA REF)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (POOL MULTI-KEY PIXTRAL + MEMORIA REAL)
 # ==============================================================================
 
 import os
@@ -24,14 +24,16 @@ import pymupdf as fitz
 from PIL import Image
 import io
 
-print("⏳ [1/2] Verificando credenciales...", flush=True)
+print("⏳ [1/2] Configurando Pool de Claves de Mistral AI...", flush=True)
 
-mistral_key = os.environ.get('MISTRAL_API_KEY', '').strip()
-if len(mistral_key) <= 10:
-    print("❌ ERROR CRÍTICO: No se detectó MISTRAL_API_KEY en los secretos.", flush=True)
+raw_keys = os.environ.get('MISTRAL_API_KEY', '').strip()
+lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
+
+if not lista_keys:
+    print("❌ ERROR CRÍTICO: No se detectó ninguna clave válida en MISTRAL_API_KEY.", flush=True)
     sys.exit(1)
 
-print("   ✅ Motor Pixtral conectado y listo.", flush=True)
+print(f"   ✅ Pool activo con {len(lista_keys)} clave(s) de Mistral configurada(s).", flush=True)
 
 MODELOS_PIXTRAL = [
     "pixtral-12b-2409",
@@ -47,6 +49,8 @@ RUTA_ENVIADAS = os.path.join(RUTA_BASE, '15_01_Cartas_Enviadas')
 RUTA_RECIBIDAS = os.path.join(RUTA_BASE, '15_04_Comunic_Recibidas')
 
 lock_csv = threading.Lock()
+lock_keys = threading.Lock()
+cooldown_keys = {k: 0.0 for k in lista_keys}
 
 def limpiar_asunto(asunto_raw, texto_doc="", es_radicada=False):
     try:
@@ -56,7 +60,7 @@ def limpiar_asunto(asunto_raw, texto_doc="", es_radicada=False):
         t = " ".join(t.split())
         t = ILLEGAL_CHARACTERS_RE.sub("", t)
 
-        # Si es carta Radicada y en el documento original era una Referencia, asegurar el prefijo "Ref.: "
+        # Regla estricta para cartas Radicadas
         if es_radicada:
             tiene_ref_en_texto = bool(re.search(r'\b(Ref\.?|REFERENCIA)\s*:', texto_doc, re.IGNORECASE))
             if tiene_ref_en_texto and not re.match(r'^(?:Ref\.?|REFERENCIA)\s*:', t, re.IGNORECASE):
@@ -133,13 +137,13 @@ PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ").
 2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, transcribe su nombre completo.
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta. Si es persona natural, su nombre completo.
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
 6. "ASUNTO": 
    - Si la carta tiene "Ref.:" o "REFERENCIA:", DEBES TRANSCRIBIRLO OBLIGATORIAMENTE INCLUYENDO EL PREFIJO "Ref.: " (ejemplo: "Ref.: Contrato de Interventoría 145 de 2014...").
    - Si tiene "ASUNTO:", transcribe el texto literal.
-   - PROHIBIDO suprimir o borrar la palabra "Ref.:" si aparece en el encabezado.
+   - PROHIBIDO suprimir la palabra "Ref.:" si aparece en el encabezado.
    - PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
 
 DEVOLVER OBLIGATORIAMENTE UN JSON VÁLIDO:
@@ -165,50 +169,65 @@ def parsear_json(texto):
     except Exception:
         return None
 
-def consultar_pixtral(b64_img, texto_digital, nombre_archivo, tipo_flujo):
+def consultar_pixtral_pool(b64_img, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
     if not b64_img:
-        return None, ""
+        return None, "", ""
 
     apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2200]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
+    num_keys = len(lista_keys)
+    start_key_idx = (item_num + hilo_id) % num_keys
 
-    headers = {
-        "Authorization": f"Bearer {mistral_key}",
-        "Content-Type": "application/json"
-    }
+    for intento in range(num_keys):
+        idx = (start_key_idx + intento) % num_keys
+        k_actual = lista_keys[idx]
+        nombre_key = f"Key-{idx+1}"
 
-    for mod in MODELOS_PIXTRAL:
-        try:
-            payload = {
-                "model": mod,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_final},
-                            {
-                                "type": "image_url",
-                                "image_url": f"data:image/jpeg;base64,{b64_img}"
-                            }
-                        ]
-                    }
-                ]
-            }
-            resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=45)
-            if resp.status_code == 200:
-                data = resp.json()
-                contenido = data["choices"][0]["message"]["content"]
-                d = parsear_json(contenido)
-                if d and isinstance(d, dict) and any(d.values()):
-                    return d, mod
-            else:
-                print(f"      ℹ️ [Pixtral {mod} HTTP {resp.status_code}]: {resp.text[:130]}", flush=True)
-        except Exception as e:
-            print(f"      ℹ️ [Fallo Pixtral {mod}]: {e}", flush=True)
+        with lock_keys:
+            if cooldown_keys[k_actual] > time.time():
+                continue
 
-    return None, ""
+        headers = {
+            "Authorization": f"Bearer {k_actual}",
+            "Content-Type": "application/json"
+        }
+
+        for mod in MODELOS_PIXTRAL:
+            try:
+                payload = {
+                    "model": mod,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_final},
+                                {
+                                    "type": "image_url",
+                                    "image_url": f"data:image/jpeg;base64,{b64_img}"
+                                }
+                            ]
+                        }
+                    ]
+                }
+                resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=45)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    contenido = data["choices"][0]["message"]["content"]
+                    d = parsear_json(contenido)
+                    if d and isinstance(d, dict) and any(d.values()):
+                        return d, nombre_key, mod
+                elif resp.status_code == 429:
+                    with lock_keys:
+                        cooldown_keys[k_actual] = time.time() + 5  # Pausa breve para esa clave
+                    break
+                else:
+                    print(f"      ℹ️ [{nombre_key} | {mod} HTTP {resp.status_code}]: {resp.text[:120]}", flush=True)
+            except Exception as e:
+                print(f"      ℹ️ [{nombre_key} | {mod}]: {e}", flush=True)
+
+    return None, "", ""
 
 def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
@@ -301,7 +320,6 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
             elif "ALMA" in texto_completo or "concesion" in texto_completo.lower():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-    # Se aplica la regla para conservar Ref.: en RADICADAS
     asunto_final = limpiar_asunto(ia_asunto, texto_completo, es_radicada=(not es_recibida))
     fecha_final = normalizar_fecha(ia_fecha, anio_defecto=anio_carpeta)
     if not fecha_final:
@@ -325,10 +343,10 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
     if not b64_img:
         return False
 
-    datos, mod_usado = consultar_pixtral(b64_img, txt1, pdf, tipo)
+    datos, key_usada, mod_usado = consultar_pixtral_pool(b64_img, txt1, pdf, tipo, item_num, hilo_id)
 
     if datos is None:
-        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf} con Pixtral.", flush=True)
+        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf}.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
@@ -349,15 +367,36 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    print(f"📄 [Hilo-{hilo_id} | Pixtral: {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
+    print(f"📄 [Hilo-{hilo_id} | {key_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
+
+def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=False):
+    if es_prueba:
+        if os.path.exists(ruta_memoria_final):
+            try: os.remove(ruta_memoria_final)
+            except: pass
+        return set(), 1
+
+    if not os.path.exists(ruta_memoria_final):
+        return set(), 1
+
+    try:
+        df = pd.read_csv(ruta_memoria_final)
+        if df.empty or "UBICACION_ARCHIVO" not in df.columns:
+            return set(), 1
+        procesados = set(os.path.basename(str(r).strip()).lower() for r in df["UBICACION_ARCHIVO"].dropna())
+        print(f"✅ Memoria previa cargada con éxito: {len(procesados)} cartas ya aseguradas.", flush=True)
+        return procesados, len(df) + 1
+    except Exception as e:
+        print(f"⚠️ Error cargando memoria: {e}", flush=True)
+        return set(), 1
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (PIXTRAL - CON REGLA REF Y ENVÍO A GMAIL)", flush=True)
+    print(" MOTOR RESTREPO_2 (POOL PIXTRAL + CHECKPOINT DE MEMORIA)", flush=True)
     print("="*70, flush=True)
 
-    es_prueba = os.environ.get('ES_PRUEBA', 'si').strip().lower() in ['si', 's', 'true']
+    es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
     carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
 
     if es_prueba:
@@ -365,18 +404,19 @@ def procesar_archivos():
         etiqueta = f"PRUEBA_{limite}_por_flujo"
         ruta_memoria = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria_PRUEBA.csv')
         ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
-        if os.path.exists(ruta_memoria): os.remove(ruta_memoria)
-        if os.path.exists(ruta_excel): os.remove(ruta_excel)
-        print(f"🧪 MODO PRUEBA ACTIVO: {limite} de Enviadas y {limite} de Recibidas. Memoria intacta.", flush=True)
+        print(f"🧪 MODO PRUEBA: {limite} archivo(s) por flujo. Memoria de producción aislada.", flush=True)
     else:
         limite = None
         etiqueta = f"{carpeta_objetivo}"
         ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
         ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
+        print(f"🚀 MODO PRODUCCIÓN: Procesando año {carpeta_objetivo} con memoria persistente.", flush=True)
 
+    procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria, es_prueba=es_prueba)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
-    item_counter = 1
-    num_trabajadores = 1 if es_prueba else 2
+    
+    # Número de trabajadores según cantidad de claves (máximo 4 para cuidar cuotas)
+    num_trabajadores = 1 if es_prueba else min(len(lista_keys) * 2, 4)
 
     for tipo, ruta_raiz in flujos:
         if not os.path.exists(ruta_raiz):
@@ -388,30 +428,31 @@ def procesar_archivos():
                 if f.lower().endswith('.pdf'):
                     archivos.append((f, os.path.join(root, f), carpeta_objetivo))
 
-        if not archivos:
-            print(f"ℹ️ No hay cartas descargadas para {tipo}.", flush=True)
+        pendientes = [x for x in archivos if os.path.basename(x[0]).lower() not in procesados_basenames]
+
+        if not pendientes:
+            print(f"✅ Todas las cartas de {tipo} ya están en memoria.", flush=True)
             continue
 
-        print(f"\n📂 Procesando {len(archivos)} carta(s) en {tipo}...", flush=True)
+        print(f"\n📂 Tabulando {len(pendientes)} cartas pendientes en {tipo} con {num_trabajadores} hilo(s)...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
             futuros = []
-            for i, (pdf, ruta_completa, anio_doc) in enumerate(archivos):
+            for i, (pdf, ruta_completa, anio_doc) in enumerate(pendientes):
                 hilo_id = (i % num_trabajadores) + 1
                 f = executor.submit(procesar_un_pdf, item_counter, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, hilo_id)
                 futuros.append(f)
                 item_counter += 1
-                if es_prueba:
-                    time.sleep(1.0)
+                time.sleep(0.5)  # Pausa de seguridad
 
             for f in as_completed(futuros):
                 pass
 
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
     
-    print("\n📧 Enviando correo con el archivo Excel...", flush=True)
+    print("\n📧 Enviando correo con el archivo Excel final...", flush=True)
     enviar_correo_exito(ruta_excel, etiqueta)
-    print("\n🏁 Proceso concluido.", flush=True)
+    print("\n🏁 Proceso concluido exitosamente.", flush=True)
 
 def sanitizar_df_excel(df_sub):
     df_sub = df_sub.copy()
@@ -447,7 +488,7 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
 
 def enviar_correo_exito(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
-        print("⚠️ No se pudo enviar correo: Faltan GMAIL_USER o GMAIL_APP_PASSWORD en los Secretos.", flush=True)
+        print("⚠️ No se pudo enviar correo: Faltan GMAIL_USER o GMAIL_APP_PASSWORD.", flush=True)
         return
 
     try:
@@ -472,8 +513,6 @@ def enviar_correo_exito(ruta_archivo, etiqueta):
                 subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 filename=file_name
             )
-        else:
-            print(f"⚠️ No se encontró el archivo Excel en {ruta_archivo} para adjuntar.", flush=True)
 
         with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
