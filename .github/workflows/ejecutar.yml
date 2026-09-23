@@ -11,7 +11,7 @@ on:
           - 'no'
         default: 'si'
       limite_prueba:
-        description: 'Si es prueba, ¿cuántos archivos EN TOTAL procesar?'
+        description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO (Enviadas y Recibidas)?'
         required: false
         default: '1'
       carpeta_objetivo:
@@ -33,7 +33,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Descargar repositorio y memoria previa
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
       - name: Instalar Python
@@ -44,9 +44,9 @@ jobs:
       - name: Instalar librerías
         run: |
           pip install --upgrade pip
-          pip install pymupdf mistralai google-genai pandas openpyxl requests Pillow
+          pip install pymupdf pandas openpyxl requests Pillow
 
-      - name: Instalar conector de Google Drive (rclone)
+      - name: Instalar rclone
         run: sudo apt-get install -y rclone
 
       - name: Configurar acceso a Google Drive
@@ -61,7 +61,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Descarga Quirúrgica Exacta
+      - name: Descarga Quirúrgica Simétrica
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -87,15 +87,9 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
-              print(f'🧪 MODO PRUEBA ACTIVO: Descarga de EXACTAMENTE {limite} archivo(s) en total.')
-              todos_disponibles = [('env', x) for x in todos_env] + [('rec', x) for x in todos_rec]
-              if not todos_disponibles:
-                  print('⚠️ No se encontraron archivos.')
-                  descargar_env, descargar_rec = [], []
-              else:
-                  seleccionados = random.sample(todos_disponibles, min(len(todos_disponibles), limite))
-                  descargar_env = [x[1] for x in seleccionados if x[0] == 'env']
-                  descargar_rec = [x[1] for x in seleccionados if x[0] == 'rec']
+              print(f'🧪 MODO PRUEBA: Seleccionando {limite} de Enviadas Y {limite} de Recibidas al azar.')
+              descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
+              descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
               # Modo producción normal
               buenos = set()
@@ -110,7 +104,7 @@ jobs:
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
 
-          print(f'🎯 Archivos a descargar -> Enviadas: {len(descargar_env)} | Recibidas: {len(descargar_rec)}')
+          print(f'🎯 Archivos listos para descargar -> Enviadas: {len(descargar_env)} | Recibidas: {len(descargar_rec)}')
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
           with open('descargar_recibidas.txt', 'w') as f:
@@ -120,15 +114,13 @@ jobs:
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación
+      - name: Ejecutar la IA de Tabulación Pixtral
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
           REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
@@ -144,5 +136,5 @@ jobs:
             git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
             git push origin main || true
           else
-            echo "🧪 Modo prueba: repositorio protegido de escrituras de prueba."
+            echo "🧪 Modo prueba: Memoria de producción protegida (sin escrituras)."
           fi
