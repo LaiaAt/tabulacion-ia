@@ -43,7 +43,7 @@ jobs:
 
       - name: Instalar librerías de Python
         run: |
-          pip install openai pymupdf pandas openpyxl requests Pillow
+          pip install pymupdf google-genai pandas openpyxl requests Pillow
 
       - name: Instalar conector de Google Drive (rclone)
         run: sudo apt-get install rclone
@@ -79,9 +79,9 @@ jobs:
           carpeta = '${{ inputs.carpeta_objetivo }}'
           es_prueba = '${{ inputs.es_prueba }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}' == 'si'
-          archivo_unificado = f'RESTREPO_3_IA_memoria_{carpeta}.csv'
+          archivo_unificado = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
-          archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and 'RESTREPO_3' in f and carpeta in f]
+          archivos_memoria = [f for f in os.listdir('.') if f.endswith('.csv') and 'memoria' in f.lower() and carpeta in f]
           buenos_filenames = set()
 
           if archivos_memoria and not reiniciar and es_prueba != 'si':
@@ -155,7 +155,7 @@ jobs:
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
           REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
-          COMET_API_KEYS: ${{ secrets.COMET_API_KEYS }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
@@ -166,6 +166,6 @@ jobs:
           git config --global user.name "Bot-Memoria"
           git config --global user.email "bot@github.com"
           git pull --rebase origin main || true
-          git add RESTREPO_3_IA_memoria_*.csv || true
+          git add RESTREPO_2_IA_memoria_*.csv || true
           git commit -m "Checkpoint memoria automático [skip ci]" || echo "Sin cambios"
           git push origin main || true
