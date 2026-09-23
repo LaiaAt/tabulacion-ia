@@ -1,7 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (EXPRIMIDO TOTAL DE MODELOS + COOLDOWN 24H)
-# PRUEBA TODOS LOS MODELOS POR API | SI TODOS FALLAN -> ENFRIAMIENTO 24 HORAS
-# SI TODAS LAS APIS ESTÁN EN 24H -> DETIENE EL PROGRAMA Y ENVÍA ALERTA
+# SISTEMA DE TABULACIÓN RESTREPO_2 (HÍBRIDO: MISTRAL AI + GROQ CLOUD)
 # ==============================================================================
 
 import os
@@ -16,7 +14,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 import pandas as pd
-import requests
 
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
@@ -26,29 +23,34 @@ if hasattr(sys.stdout, 'reconfigure'):
 import pymupdf as fitz
 from PIL import Image
 import io
-from google import genai
-from google.genai import types
 
-print("⏳ [1/3] Cargando Pool de Claves Gemini...", flush=True)
+print("⏳ [1/3] Inicializando proveedores de Inteligencia Artificial...", flush=True)
 
-raw_keys = os.environ.get('GEMINI_API_KEYS') or os.environ.get('GEMINI_API_KEY') or ""
-lista_keys = [k.strip() for k in raw_keys.replace('\n', ',').split(',') if len(k.strip()) > 10]
-
-gemini_clients = []
-for i, k in enumerate(lista_keys, 1):
+# 1. CARGA DE MISTRAL AI
+mistral_clients = []
+m_key = os.environ.get('MISTRAL_API_KEY', '').strip()
+if len(m_key) > 10:
     try:
-        c = genai.Client(
-            api_key=k,
-            http_options=types.HttpOptions(timeout=25_000)
-        )
-        gemini_clients.append((f"Key-{i}", c))
+        from mistralai import Mistral
+        mistral_clients.append(("Mistral-Key-1", Mistral(api_key=m_key)))
+        print("   ✅ Mistral AI conectado exitosamente.", flush=True)
     except Exception as e:
-        print(f"⚠️ Error cargando clave Gemini #{i}: {e}", flush=True)
+        print(f"   ⚠️ Advertencia al conectar Mistral AI: {e}", flush=True)
 
-if gemini_clients:
-    print(f"✅ Pool de Gemini activo con {len(gemini_clients)} claves listas.", flush=True)
-else:
-    print("❌ ERROR CRÍTICO: No se cargó ninguna clave de Gemini.", flush=True)
+# 2. CARGA DE GROQ CLOUD
+groq_clients = []
+g_key = os.environ.get('GROQ_API_KEY', '').strip()
+if len(g_key) > 10:
+    try:
+        from groq import Groq
+        groq_clients.append(("Groq-Key-1", Groq(api_key=g_key)))
+        print("   ✅ Groq Cloud conectado exitosamente.", flush=True)
+    except Exception as e:
+        print(f"   ⚠️ Advertencia al conectar Groq Cloud: {e}", flush=True)
+
+if not mistral_clients and not groq_clients:
+    print("❌ ERROR CRÍTICO: No se detectó ninguna API Key válida (ni MISTRAL_API_KEY ni GROQ_API_KEY).", flush=True)
+    sys.exit(1)
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
@@ -62,55 +64,49 @@ lock_csv = threading.Lock()
 lock_key = threading.Lock()
 evento_cuota_agotada = threading.Event()
 
-# Diccionario para controlar el enfriamiento por clave
-key_cooldowns = {nombre: 0.0 for nombre, _ in gemini_clients}
+# Catálogo de modelos con visión
+MODELOS_MISTRAL = ["pixtral-12b-2409", "mistral-small-latest"]
+MODELOS_GROQ = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
 
-# ==============================================================================
-# LISTADO DE MODELOS FLASH DISPONIBLES EN GOOGLE AI STUDIO
-# ==============================================================================
-MODELOS_FASE_TURBO = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash"
-]
-
-MODELOS_AUDITORES = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash"
-]
+# Cooldown de modelos por proveedor
+cooldowns_mistral = {m: 0.0 for m in MODELOS_MISTRAL}
+cooldowns_groq = {m: 0.0 for m in MODELOS_GROQ}
 
 def limpiar_asunto(asunto_raw, texto_doc=""):
-    m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-    if m_asunto_expl:
-        t_as = " ".join(m_asunto_expl.group(1).split()).strip()
-        t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
-        if len(t_as) > 3 and not t_as.startswith("CI004_"):
-            asunto_raw = t_as
-    elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
-        m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
-        if m:
-            asunto_raw = " ".join(m.group(1).split())
-        else:
-            m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración)[^\n\r]+', texto_doc, re.IGNORECASE)
-            asunto_raw = m2.group(0).strip() if m2 else ""
+    try:
+        m_asunto_expl = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+        if m_asunto_expl:
+            t_as = " ".join(m_asunto_expl.group(1).split()).strip()
+            t_as = re.sub(r'^(?:ASUNTO)\s*[:\-\.]*\s*', '', t_as, flags=re.IGNORECASE).strip()
+            if len(t_as) > 3 and not t_as.startswith("CI004_"):
+                asunto_raw = t_as
+        elif not asunto_raw or str(asunto_raw).strip().upper() in ["NONE", "N/A", "", "SIN ASUNTO CONSTATADO", "NAN"] or "CI004_" in str(asunto_raw):
+            m = re.search(r'((?:Ref\.?|REFERENCIA|OBJETO)\s*[:\-\.]*\s*.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_doc, re.IGNORECASE | re.DOTALL)
+            if m:
+                asunto_raw = " ".join(m.group(1).split())
+            else:
+                m2 = re.search(r'(?:Seguimiento|Solicitud|Respuesta|Informe|Envío|Remisión|Reemplazo|Otorgamiento|Reiteración)[^\n\r]+', texto_doc, re.IGNORECASE)
+                asunto_raw = m2.group(0).strip() if m2 else ""
 
-    t = " ".join(str(asunto_raw).strip().split())
-    t = re.sub(r'[1lI\|]{4,}', ' ', t)
-    t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
-    t = " ".join(t.split())
-    return ILLEGAL_CHARACTERS_RE.sub("", t)
+        t = " ".join(str(asunto_raw).strip().split())
+        t = re.sub(r'[1lI\|]{4,}', ' ', t)
+        t = re.sub(r'[\u2500-\u257f\u2580-\u259f]+', ' ', t)
+        t = " ".join(t.split())
+        return ILLEGAL_CHARACTERS_RE.sub("", t)
+    except Exception:
+        return ""
 
 def obtener_insumos_documento(ruta_pdf):
     try:
         doc = fitz.open(ruta_pdf)
         total_paginas = len(doc)
+        if total_paginas == 0:
+            doc.close()
+            return None, "", "", 0
+
         texto_completo_pdf = ""
-        for p in doc: texto_completo_pdf += p.get_text() + "\n"
+        for p in doc: 
+            texto_completo_pdf += p.get_text() + "\n"
         texto_pag1 = doc[0].get_text()
 
         num_pag_imagen = 0
@@ -127,21 +123,21 @@ def obtener_insumos_documento(ruta_pdf):
             texto_para_ia = texto_pag1
 
         pagina = doc[num_pag_imagen]
-        pix = pagina.get_pixmap(dpi=160)
+        pix = pagina.get_pixmap(dpi=140)
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
 
-        if img.width > 1500:
-            ratio = 1500 / float(img.width)
-            img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
+        if img.width > 1200:
+            ratio = 1200 / float(img.width)
+            img = img.resize((1200, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
 
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=85, optimize=True)
+        img.save(buffer, format="JPEG", quality=80, optimize=True)
         img_bytes = buffer.getvalue()
         b64_str = base64.b64encode(img_bytes).decode('utf-8')
         doc.close()
-        return b64_str, img_bytes, texto_completo_pdf, texto_para_ia, total_paginas
+        return b64_str, texto_completo_pdf, texto_para_ia, total_paginas
     except Exception:
-        return None, None, "", "", 0
+        return None, "", "", 0
 
 def normalizar_fecha(fecha_str, anio_defecto=""):
     if not fecha_str or str(fecha_str).strip() in ["N/A", "None", "", "01/01/2017"]:
@@ -166,13 +162,13 @@ PROHIBIDO USAR FRASES COMO "SIN ASUNTO CONSTATADO" O "SIN REMITENTE". Si algo no
 
 REGLAS OBLIGATORIAS:
 1. "RAZON_SOCIAL_REMITENTE": Entidad que emite la carta (ej. "CONSORCIO 4C", "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ"). Mira el logo o membrete.
-2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-4669", "CI.004/GP2145/17/7.1.9", "GP-XXXX").
-3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural (ej. "LEONARDO SALAZAR", "MÓNICA OVIEDO"), transcribe el nombre de la persona.
+2. "NO_RADICADO_REMITENTE": El radicado oficial de quien envía (ej. "ALMA-2017-XXXX", "CI.004/...", "GP-XXXX").
+3. "RAZON_SOCIAL_DESTINATARIO": Persona o entidad a quien va dirigida la carta (después de "Señores:", "Señor:", "Doctor"). Si es persona natural, transcribe el nombre.
 4. "NO_RADICADO_DESTINATARIO": Radicado o sello recibido (ej. Sticker de barras "ALMA-R-2017-XXXXX", sello ANI "2017-409-XXXXXX-X", sello GP).
 5. "FECHA": Fecha real impresa en la carta formal (Formato DD/MM/AAAA).
-6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa tal cual. PROHIBIDO poner nombres de archivos técnicos (ej. "CI004_...").
+6. "ASUNTO": Si el documento tiene "ASUNTO:" y "REFERENCIA:" separados, transcribe SOLO el "ASUNTO:". Si solo tiene "Ref.", transcribe la referencia completa. PROHIBIDO poner nombres de archivo técnico como "CI004_...".
 
-JSON REQUERIDO:
+Devuelve OBLIGATORIAMENTE un JSON con esta estructura exacta:
 {
     "RAZON_SOCIAL_REMITENTE": "...",
     "NO_RADICADO_REMITENTE": "...",
@@ -184,87 +180,91 @@ JSON REQUERIDO:
 """
 
 def parsear_json(texto):
+    if not texto: return None
     try:
         t = re.sub(r'```[a-zA-Z]*', '', texto).replace('```', '').strip()
         start, end = t.find('{'), t.rfind('}')
-        if start != -1 and end != -1: return json.loads(t[start:end+1])
+        if start != -1 and end != -1: 
+            return json.loads(t[start:end+1])
         return json.loads(t)
-    except: return None
+    except Exception:
+        return None
 
 # ==============================================================================
-# FASE 1: BARRIDO TURBO (EXPRIME TODOS LOS MODELOS ANTES DE DESCARTAR LA API)
+# MOTOR HÍBRIDO (MISTRAL AI CON RELEVO AUTOMÁTICO A GROQ)
 # ==============================================================================
-def consultar_ia_completa(b64_img, img_bytes, texto_digital, nombre_archivo, tipo_flujo, item_num, hilo_id):
-    if not gemini_clients or not img_bytes or evento_cuota_agotada.is_set():
+def consultar_ia_hibrida(b64_img, texto_digital, nombre_archivo, tipo_flujo):
+    if not b64_img or evento_cuota_agotada.is_set():
         return None, "", ""
 
-    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:3500]}"
+    apoyo = f"\nTipo de flujo: {tipo_flujo}\nTexto detectado:\n{texto_digital[:2500]}"
     prompt_final = f"Archivo: {nombre_archivo}\n" + PROMPT_AUDITORIA + apoyo
-    part_img = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+    now = time.time()
 
-    total_keys = len(gemini_clients)
-    start_idx = (item_num + hilo_id) % total_keys
-
-    # Chequeo rápido si ya todas las claves están fuera de servicio
-    with lock_key:
-        now = time.time()
-        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
-            if not evento_cuota_agotada.is_set():
-                print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. 🚨", flush=True)
-                evento_cuota_agotada.set()
-            return None, "", ""
-
-    for intento in range(total_keys):
-        if evento_cuota_agotada.is_set():
-            return None, "", ""
-
-        idx = (start_idx + intento) % total_keys
-        nombre_key, client = gemini_clients[idx]
-
-        # Verificar si la clave está en enfriamiento o muerta
-        with lock_key:
-            if key_cooldowns.get(nombre_key, 0) > time.time():
+    # 1. INTENTO CON MISTRAL AI (PIXTRAL)
+    if mistral_clients:
+        client_mistral = mistral_clients[0][1]
+        for mod in MODELOS_MISTRAL:
+            if cooldowns_mistral.get(mod, 0) > now:
                 continue
-
-        exito_en_algun_modelo = False
-        clave_invalida = False
-
-        # EXPRIMIR TODOS LOS MODELOS EN ESTA API
-        for mod in MODELOS_FASE_TURBO:
             try:
-                r = client.models.generate_content(
-                    model=mod, contents=[part_img, prompt_final],
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_final},
+                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64_img}"}
+                        ]
+                    }
+                ]
+                r = client_mistral.chat.complete(
+                    model=mod,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.0
                 )
-                d = parsear_json(r.text)
+                d = parsear_json(r.choices[0].message.content)
                 if d and isinstance(d, dict) and any(d.values()):
-                    return d, nombre_key, mod
+                    return d, "Mistral", mod
             except Exception as e:
                 err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    time.sleep(0.3)
-                    continue  # Continúa al siguiente modelo
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google (401/403). Se descarta permanentemente.", flush=True)
-                    clave_invalida = True
-                    break
-                else:
-                    continue
+                if any(k in err for k in ["429", "RATE_LIMIT", "QUOTA", "CAPACITY"]):
+                    cooldowns_mistral[mod] = time.time() + 60
+                continue
 
-        with lock_key:
-            if clave_invalida:
-                key_cooldowns[nombre_key] = time.time() + (86400 * 365)  # Descarte permanente
-            elif not exito_en_algun_modelo:
-                print(f"      🔴 {nombre_key} agotó todos sus modelos. Enfriamiento de 24h.", flush=True)
-                key_cooldowns[nombre_key] = time.time() + 86400
-
-    # Verificar nuevamente si después de este intento todas las claves quedaron inutilizables
-    with lock_key:
-        now = time.time()
-        if all(key_cooldowns.get(nombre, 0) > now for nombre, _ in gemini_clients):
-            if not evento_cuota_agotada.is_set():
-                print("\n🚨 TODAS LAS CLAVES AGOTARON SU CUOTA O FUERON RECHAZADAS. DETENIENDO EL PROGRAMA. 🚨", flush=True)
-                evento_cuota_agotada.set()
+    # 2. RELEVO CON GROQ CLOUD (LLAMA 3.2 VISION)
+    if groq_clients:
+        client_groq = groq_clients[0][1]
+        for mod in MODELOS_GROQ:
+            if cooldowns_groq.get(mod, 0) > now:
+                continue
+            try:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_final},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}
+                            }
+                        ]
+                    }
+                ]
+                r = client_groq.chat.completions.create(
+                    model=mod,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    temperature=0.0
+                )
+                d = parsear_json(r.choices[0].message.content)
+                if d and isinstance(d, dict) and any(d.values()):
+                    return d, "Groq", mod
+            except Exception as e:
+                err = str(e).upper()
+                if any(k in err for k in ["429", "RATE_LIMIT", "QUOTA"]):
+                    cooldowns_groq[mod] = time.time() + 60
+                continue
 
     return None, "", ""
 
@@ -274,8 +274,7 @@ def motor_cero_vacios(datos, nombre_archivo, texto_completo, texto_pag1, anio_ca
     def clean(val):
         if not val or str(val).strip().upper() in ["NONE", "N/A", "NULL", "SIN REMITENTE CONSTATADO", "SIN DESTINATARIO CONSTATADO", "SIN ASUNTO CONSTATADO", "SIN RADICADO CONSTATADO", "SIN RADICADO REMITENTE", "NAN"]:
             return ""
-        s = str(val).strip()
-        return ILLEGAL_CHARACTERS_RE.sub("", s)
+        return ILLEGAL_CHARACTERS_RE.sub("", str(val).strip())
 
     ia_dest = clean(datos.get("RAZON_SOCIAL_DESTINATARIO", ""))
     ia_rem = clean(datos.get("RAZON_SOCIAL_REMITENTE", ""))
@@ -390,7 +389,15 @@ def buscar_pdfs_en_ruta(ruta_base, carpeta_filtro=None):
             archivos_encontrados.append((pdf, os.path.join(root, pdf), anio_detectado))
     return archivos_encontrados
 
-def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
+def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final, es_prueba=False):
+    # SI ES MODO PRUEBA, NO LEER NI TOCAR MEMORIAS ANTERIORES
+    if es_prueba:
+        print("🧪 MODO PRUEBA: Memoria aislada. Se procesarán los archivos seleccionados sin filtro previo.", flush=True)
+        if os.path.exists(ruta_memoria_final):
+            try: os.remove(ruta_memoria_final)
+            except: pass
+        return set(), 1
+
     archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
     
     if not archivos_memoria:
@@ -409,7 +416,7 @@ def fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria_final):
     if not dfs:
         return set(), 1
 
-    print(f"🧹 Fusionando memorias existentes...", flush=True)
+    print(f"🧹 Fusionando memorias de producción existentes...", flush=True)
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["UBICACION_ARCHIVO"])
 
     for idx, row in df.iterrows():
@@ -479,14 +486,19 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
     t_inicio = time.time()
     ruta_relativa = os.path.relpath(ruta_completa, RUTA_BASE).strip()
 
-    b64_img, img_bytes, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
-    datos, clave_usada, mod_usado = consultar_ia_completa(b64_img, img_bytes, txt1, pdf, tipo, item_num, hilo_id)
+    b64_img, txt, txt1, paginas = obtener_insumos_documento(ruta_completa)
+    if not b64_img:
+        return False
+
+    datos, proveedor, mod_usado = consultar_ia_hibrida(b64_img, txt1, pdf, tipo)
 
     if datos is None:
+        print(f"⚠️ [Hilo-{hilo_id}] No se pudo tabular {pdf} con ninguna IA.", flush=True)
         return False
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
 
+    # Nota: El producto final NO incluye columnas técnicas de la IA
     fila = {
         "ÍTEM": item_num,
         "DEL FOLIO/PAGINAS": paginas,
@@ -503,220 +515,44 @@ def procesar_un_pdf_fase_turbo(item_num, pdf, ruta_completa, anio_doc, tipo, rut
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    print(f"📄 [Hilo-{hilo_id} | {clave_usada} | {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
+    # En el avance de la consola SÍ se muestra el modelo usado
+    print(f"📄 [Hilo-{hilo_id} | {proveedor}: {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
-
-# ==============================================================================
-# FASE 2: AUDITORÍA DE CALIDAD FINAL POR IA (MODELOS EXPERTOS)
-# ==============================================================================
-PROMPT_AUDITORIA_CALIDAD_FINAL = """
-Eres el Auditor Principal de Control de Calidad Archivística.
-Tu misión es inspeccionar esta fila que tiene celdas vacías o texto con ruido de escáner.
-Revisa el documento completo y devuelve el JSON con los datos PERFECTOS, FIELES Y LITERALES.
-
-JSON REQUERIDO:
-{
-    "RAZON_SOCIAL_REMITENTE": "...",
-    "NO_RADICADO_REMITENTE": "...",
-    "RAZON_SOCIAL_DESTINATARIO": "...",
-    "NO_RADICADO_DESTINATARIO": "...",
-    "FECHA": "DD/MM/AAAA",
-    "ASUNTO": "..."
-}
-"""
-
-def auditar_fila_con_ia_experta(ruta_pdf, texto_actual, campos_dudosos, nombre_archivo, tipo_flujo, key_idx):
-    if not gemini_clients or evento_cuota_agotada.is_set():
-        return None
-
-    try:
-        doc = fitz.open(ruta_pdf)
-        total_pags = len(doc)
-        partes = []
-
-        for p_idx in range(min(total_pags, 2)):
-            pix = doc[p_idx].get_pixmap(dpi=160)
-            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-            if img.width > 1500:
-                ratio = 1500 / float(img.width)
-                img = img.resize((1500, int(float(img.height) * ratio)), Image.Resampling.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85, optimize=True)
-            partes.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
-        
-        doc.close()
-    except Exception:
-        return None
-
-    prompt_auditor = (
-        f"DOCUMENTO: {nombre_archivo}\n"
-        f"CAMPOS QUE REQUIEREN AUDITORÍA: {', '.join(campos_dudosos)}\n"
-        f"TEXTO ACTUAL AUDITADO: '{texto_actual}'\n"
-        + PROMPT_AUDITORIA_CALIDAD_FINAL
-    )
-    partes.append(prompt_auditor)
-
-    total_keys = len(gemini_clients)
-
-    for intento in range(total_keys):
-        if evento_cuota_agotada.is_set():
-            return None
-
-        idx = (key_idx + intento) % total_keys
-        nombre_key, client = gemini_clients[idx]
-
-        with lock_key:
-            if key_cooldowns.get(nombre_key, 0) > time.time():
-                continue
-
-        clave_invalida = False
-
-        for mod in MODELOS_AUDITORES:
-            try:
-                r = client.models.generate_content(
-                    model=mod, contents=partes,
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
-                )
-                d = parsear_json(r.text)
-                if d and isinstance(d, dict) and any(d.values()):
-                    print(f"      ✨ [AUDITORÍA FILA | {nombre_key} | {mod}] Datos corregidos y completados.", flush=True)
-                    return d
-            except Exception as e:
-                err = str(e).upper()
-                if any(k in err for k in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE_LIMIT"]):
-                    time.sleep(0.3)
-                    continue
-                elif any(k in err for k in ["API_KEY_INVALID", "PERMISSION_DENIED", "401", "403"]):
-                    print(f"      ❌ {nombre_key} rechazada por Google. Se descarta permanentemente.", flush=True)
-                    clave_invalida = True
-                    break
-                else:
-                    continue
-
-        with lock_key:
-            if clave_invalida:
-                key_cooldowns[nombre_key] = time.time() + (86400 * 365)
-            else:
-                key_cooldowns[nombre_key] = time.time() + 86400
-
-    return None
-
-def auditar_y_corregir_tabla_final(ruta_memoria):
-    if not os.path.exists(ruta_memoria):
-        return
-
-    df_mem = pd.read_csv(ruta_memoria)
-    if df_mem.empty:
-        return
-
-    print("\n🧐 [FASE 2: AUDITORÍA DE CALIDAD] Evaluando celdas vacías o ruido...", flush=True)
-
-    columnas_evaluar = [
-        "RAZON SOCIAL REMITENTE", "No. RADICADO REMITENTE",
-        "RAZON SOCIAL DESTINATARIO", "No. RADICADO DESTINATARIO",
-        "FECHA (DD/MM/AAAA)", "ASUNTO / TIPO DOCUMENTAL"
-    ]
-
-    filas_novedad = []
-    for idx, row in df_mem.iterrows():
-        asunto_val = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
-        tiene_vacios = any(not str(row.get(col, "")).strip() or str(row.get(col, "")).strip() in ['nan', 'None', 'NAN'] for col in columnas_evaluar)
-        
-        tiene_ruido = bool(
-            re.search(r'[\|!¡]{2,}', asunto_val) or
-            re.search(r'ASUNTO:\s*$', asunto_val, re.IGNORECASE) or
-            re.search(r'1{5,}', asunto_val) or
-            "CI004_" in asunto_val or
-            "Delivery Status" in asunto_val or
-            len(asunto_val) < 6
-        )
-
-        if tiene_vacios or tiene_ruido:
-            filas_novedad.append(idx)
-
-    if not filas_novedad:
-        print("✅ Control de Calidad: 100% de las filas están limpias.", flush=True)
-        return
-
-    print(f"⚠️ Detectadas {len(filas_novedad)} cartas con vacíos o ruido. Iniciando IA Auditora...", flush=True)
-
-    corregidos = 0
-    for i, idx in enumerate(filas_novedad, 1):
-        if evento_cuota_agotada.is_set():
-            break
-
-        row = df_mem.loc[idx]
-        ubic_rel = str(row["UBICACION_ARCHIVO"]).strip()
-        ruta_pdf_completa = os.path.join(RUTA_BASE, ubic_rel)
-        nombre_pdf = os.path.basename(ubic_rel)
-        tipo_flujo = "RECIBIDAS" if "recibidas" in ubic_rel.lower() else "RADICADAS"
-
-        if not os.path.exists(ruta_pdf_completa):
-            continue
-
-        campos_a_revisar = [c for c in columnas_evaluar if not str(row.get(c, "")).strip() or str(row.get(c, "")).strip() in ['nan', 'None']]
-        asunto_actual = str(row.get("ASUNTO / TIPO DOCUMENTAL", ""))
-
-        print(f"   [{i}/{len(filas_novedad)}] Auditando {nombre_pdf}...", flush=True)
-
-        datos_auditados = auditar_fila_con_ia_experta(ruta_pdf_completa, asunto_actual, campos_a_revisar, nombre_pdf, tipo_flujo, i)
-
-        if datos_auditados:
-            try:
-                doc_t = fitz.open(ruta_pdf_completa)
-                txt_t = ""
-                for p in doc_t: txt_t += p.get_text() + "\n"
-                doc_t.close()
-            except:
-                txt_t = ""
-
-            datos_pulidos = motor_cero_vacios(datos_auditados, nombre_pdf, txt_t, "", "2017", tipo_flujo)
-
-            for col_nombre in columnas_evaluar:
-                clave_dict = col_nombre.replace(" (DD/MM/AAAA)", "").replace(" / TIPO DOCUMENTAL", "").replace(" ", "_")
-                val_nuevo = datos_pulidos.get(clave_dict, "")
-                if val_nuevo and str(val_nuevo).strip():
-                    df_mem.at[idx, col_nombre] = str(val_nuevo).strip()
-
-            corregidos += 1
-
-    df_mem.to_csv(ruta_memoria, index=False)
-    print(f"🎉 Auditoría Final completada: {corregidos} cartas corregidas.", flush=True)
 
 # ==============================================================================
 # PROCESO PRINCIPAL
 # ==============================================================================
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (EXPRIMIDO TOTAL + AUDITORÍA FINAL EXPERTA)", flush=True)
+    print(" MOTOR RESTREPO_2 (HÍBRIDO: MISTRAL PIXTRAL + GROQ LLAMA 3.2)", flush=True)
     print("="*70, flush=True)
 
-    es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower()
-    limite = None
+    es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
     carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
-    etiqueta = f"{carpeta_objetivo}"
-
-    if es_prueba in ['si', 's', 'true']:
-        try:
-            limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
-        except Exception:
-            limite = 5
-        print(f"🎲 MODO PRUEBA: {limite} archivos por flujo.", flush=True)
+    
+    if es_prueba:
+        limite = int(os.environ.get('LIMITE_PRUEBA', '5').strip())
         etiqueta = f"PRUEBA_{limite}_archivos"
+        ruta_memoria = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria_PRUEBA.csv')
+        ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
+        print(f"🧪 MODO PRUEBA ACTIVO: Límite de {limite} archivos por flujo. Sin memoria previa.", flush=True)
+    else:
+        limite = None
+        etiqueta = f"{carpeta_objetivo}"
+        ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
+        ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
 
-    ruta_memoria = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_memoria_{carpeta_objetivo}.csv')
-    ruta_excel = os.path.join(RUTA_BASE, f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
+        reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
+        if reiniciar:
+            archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
+            for m in archivos_memoria:
+                try: os.remove(os.path.join(RUTA_BASE, m))
+                except: pass
+            if os.path.exists(ruta_excel):
+                try: os.remove(ruta_excel)
+                except: pass
 
-    reiniciar = os.environ.get('REINICIAR_MEMORIA', 'no').strip().lower() in ['si', 's', 'true']
-    if reiniciar:
-        archivos_memoria = [f for f in os.listdir(RUTA_BASE) if f.endswith('.csv') and 'memoria' in f.lower() and carpeta_objetivo in f]
-        for m in archivos_memoria:
-            os.remove(os.path.join(RUTA_BASE, m))
-            print(f"🧹 REINICIO FORZADO: Memoria {m} eliminada.", flush=True)
-        if os.path.exists(ruta_excel):
-            os.remove(ruta_excel)
-
-    procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria)
+    procesados_basenames, item_counter = fusionar_y_cargar_memoria(carpeta_objetivo, ruta_memoria, es_prueba=es_prueba)
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
 
     for tipo, ruta_raiz in flujos:
@@ -724,7 +560,7 @@ def procesar_archivos():
             break
 
         print(f"\n📂 Buscando en: {tipo}...", flush=True)
-        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo)
+        todos_los_pdfs = buscar_pdfs_en_ruta(ruta_raiz, carpeta_objetivo if not es_prueba else None)
         
         pendientes = []
         for p, r, a in todos_los_pdfs:
@@ -732,16 +568,16 @@ def procesar_archivos():
                 pendientes.append((p, r, a))
 
         ya_listos = len(todos_los_pdfs) - len(pendientes)
-        print(f"   Total en Drive: {len(todos_los_pdfs)} | Listos: {ya_listos} | A PROCESAR: {len(pendientes)}", flush=True)
+        print(f"   Total descargados: {len(todos_los_pdfs)} | Listos: {ya_listos} | A PROCESAR: {len(pendientes)}", flush=True)
 
         if limite and len(pendientes) > limite:
             pendientes = random.sample(pendientes, limite)
 
         if not pendientes:
-            print(f"   ✅ Todas las cartas de {tipo} ya están perfectamente tabuladas.", flush=True)
+            print(f"   ✅ Cartas de {tipo} completadas.", flush=True)
             continue
 
-        num_trabajadores = 8
+        num_trabajadores = 4
         print(f"🚀 Procesando {len(pendientes)} cartas de {tipo} con {num_trabajadores} HILOS...", flush=True)
 
         with ThreadPoolExecutor(max_workers=num_trabajadores) as executor:
@@ -758,18 +594,13 @@ def procesar_archivos():
                 if evento_cuota_agotada.is_set():
                     break
 
-    if not evento_cuota_agotada.is_set():
-        auditar_y_corregir_tabla_final(ruta_memoria)
-
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
 
     if evento_cuota_agotada.is_set():
-        print("\n📧 Enviando correo de ALERTA al dueño...", flush=True)
-        enviar_correo_alerta_cuota(ruta_excel, etiqueta)
-        print("🛑 Programa pausado de forma segura por falta de cuota.", flush=True)
-        sys.exit(0)
+        print("\n📧 Enviando correo de ALERTA...", flush=True)
+        enviar_correo_alerta(ruta_excel, etiqueta)
     else:
-        print("\n📧 Enviando correo de ÉXITO al dueño...", flush=True)
+        print("\n📧 Enviando correo de FINALIZACIÓN...", flush=True)
         enviar_correo_exito(ruta_excel, etiqueta)
 
 def sanitizar_df_excel(df_sub):
@@ -780,90 +611,72 @@ def sanitizar_df_excel(df_sub):
 
 def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
     if os.path.exists(ruta_memoria):
-        df_final = pd.read_csv(ruta_memoria)
-        if not df_final.empty:
-            es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
-            df_recibidas = df_final[es_recibida].copy()
-            df_radicadas = df_final[~es_recibida].copy()
+        try:
+            df_final = pd.read_csv(ruta_memoria)
+            if not df_final.empty:
+                es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
+                df_recibidas = df_final[es_recibida].copy()
+                df_radicadas = df_final[~es_recibida].copy()
 
-            if not df_recibidas.empty:
-                df_recibidas["ÍTEM"] = range(1, len(df_recibidas) + 1)
-                df_recibidas = sanitizar_df_excel(df_recibidas)
+                if not df_recibidas.empty:
+                    df_recibidas["ÍTEM"] = range(1, len(df_recibidas) + 1)
+                    df_recibidas = sanitizar_df_excel(df_recibidas)
 
-            if not df_radicadas.empty:
-                df_radicadas["ÍTEM"] = range(1, len(df_radicadas) + 1)
-                df_radicadas = sanitizar_df_excel(df_radicadas)
+                if not df_radicadas.empty:
+                    df_radicadas["ÍTEM"] = range(1, len(df_radicadas) + 1)
+                    df_radicadas = sanitizar_df_excel(df_radicadas)
 
-            with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
-                df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
-                df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
+                with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
+                    df_recibidas.to_excel(writer, sheet_name="Recibidas", index=False)
+                    df_radicadas.to_excel(writer, sheet_name="Radicadas", index=False)
 
-            print(f"\n✅ EXCEL CON 2 HOJAS GENERADO:", flush=True)
-            print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas", flush=True)
-            print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas", flush=True)
+                print(f"\n✅ EXCEL CON 2 HOJAS GENERADO:", flush=True)
+                print(f"   📑 Hoja 'Recibidas': {len(df_recibidas)} cartas", flush=True)
+                print(f"   📑 Hoja 'Radicadas': {len(df_radicadas)} cartas", flush=True)
+        except Exception as e:
+            print(f"⚠️ Error generando Excel final: {e}", flush=True)
 
-def enviar_correo_alerta_cuota(ruta_archivo, etiqueta):
+def enviar_correo_alerta(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         return
-
-    msg = EmailMessage()
-    msg['Subject'] = f'🚨 ALERTA: Cuotas de Gemini Agotadas ({etiqueta}) - Proceso Pausado'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'⚠️ EL PROGRAMA SE HA DETENIDO DE FORMA SEGURA:\n'
-        f'Todas las claves agotaron sus cuotas o entraron en enfriamiento.\n\n'
-        f'TU AVANCE ESTÁ A SALVO: Cuando renueves las API Keys o pase el enfriamiento, reanudará exactamente donde quedó sin repetir cartas.\n\n'
-        f'Adjunto el Excel con el avance procesado hasta este momento.\n\n'
-        f'Saludos!'
-    )
-
     try:
+        msg = EmailMessage()
+        msg['Subject'] = f'🚨 ALERTA: Cuotas Agotadas ({etiqueta}) - Proceso Pausado'
+        msg['From'] = EMAIL_REMITENTE
+        msg['To'] = EMAIL_DESTINO
+        msg.set_content(f'El proceso para {etiqueta} se pausó de forma segura al alcanzar los límites de API.')
+
         if os.path.exists(ruta_archivo):
             with open(ruta_archivo, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(ruta_archivo)
-            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+                msg.add_attachment(f.read(), maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=os.path.basename(ruta_archivo))
 
         with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("📧 ¡CORREO DE ALERTA ENVIADO A TU GMAIL!", flush=True)
+        print("📧 Correo de alerta enviado.", flush=True)
     except Exception as e:
-        print(f"❌ Error al enviar correo de alerta: {e}")
+        print(f"❌ Error enviando correo de alerta: {e}")
 
 def enviar_correo_exito(ruta_archivo, etiqueta):
     if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
         return
-
-    msg = EmailMessage()
-    msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
-    msg['From'] = EMAIL_REMITENTE
-    msg['To'] = EMAIL_DESTINO
-    msg.set_content(
-        f'Hola Eduardo,\n\n'
-        f'El proceso ha finalizado con éxito total para {etiqueta}.\n'
-        f'El archivo adjunto contiene las 2 hojas completas:\n'
-        f' - Hoja "Recibidas": Destinatario siempre Consorcio 4C y radicado GP.\n'
-        f' - Hoja "Radicadas": Remitente siempre Consorcio 4C y radicado GP.\n\n'
-        f'Todos los radicados están completos y los asuntos fueron auditados por IA.\n\n'
-        f'Saludos!'
-    )
-
     try:
+        msg = EmailMessage()
+        msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
+        msg['From'] = EMAIL_REMITENTE
+        msg['To'] = EMAIL_DESTINO
+        msg.set_content(f'El proceso ha finalizado para {etiqueta} mediante el sistema de IA Híbrido.')
+
         if os.path.exists(ruta_archivo):
             with open(ruta_archivo, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(ruta_archivo)
-            msg.add_attachment(file_data, maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=file_name)
+                msg.add_attachment(f.read(), maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=os.path.basename(ruta_archivo))
 
         with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
             smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print("🚀 ¡CORREO ENVIADO CON ÉXITO!", flush=True)
+        print("🚀 ¡Correo final enviado con éxito!", flush=True)
     except Exception as e:
-        print(f"❌ Error al enviar correo: {e}")
+        print(f"❌ Error enviando correo: {e}")
 
 if __name__ == "__main__":
     procesar_archivos()
