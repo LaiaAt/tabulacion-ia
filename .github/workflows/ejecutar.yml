@@ -43,7 +43,7 @@ jobs:
 
       - name: Instalar librerías de Python
         run: |
-          pip install pymupdf google-genai pandas openpyxl requests Pillow
+          pip install openai pymupdf pandas openpyxl requests Pillow
 
       - name: Instalar conector de Google Drive (rclone)
         run: sudo apt-get install rclone
@@ -155,7 +155,7 @@ jobs:
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
           CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
           REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          COMET_API_KEYS: ${{ secrets.COMET_API_KEYS }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
