@@ -15,9 +15,9 @@ on:
         required: false
         default: '1'
       carpeta_objetivo:
-        description: 'Escribe el nombre de la carpeta a tabular (ej. "2017" o "todo")'
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2021" o "2017")'
         required: true
-        default: '2017'
+        default: '2021'
       reiniciar_memoria:
         description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
@@ -61,7 +61,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Depuración de Memoria y Descarga Quirúrgica
+      - name: Detección de Errores Críticos y Descarga Reparadora
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -75,7 +75,7 @@ jobs:
           fi
 
           python -c "
-          import os, re, random, pandas as pd
+          import os, random, pandas as pd
 
           es_prueba = '${{ inputs.es_prueba }}'.strip().lower() in ['si', 's', 'true']
           limite = int('${{ inputs.limite_prueba }}' or '1')
@@ -88,7 +88,7 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
-              print(f'🧪 MODO PRUEBA: Descargando {limite} de Enviadas Y {limite} de Recibidas.')
+              print(f'🧪 MODO PRUEBA: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
@@ -97,28 +97,34 @@ jobs:
 
               if os.path.exists(archivo_mem) and not reiniciar and os.path.getsize(archivo_mem) > 0:
                   df = pd.read_csv(archivo_mem)
+                  
+                  es_recibida = df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
+                  rem_str = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str)
+                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
                   asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
 
-                  # DETECTOR QUIRÚRGICO DE RUIDO HEREDADO DE GEMINI
-                  patron_ruido = r'recibido no|impl?i?ca aceptac|ALMA-R-2017|Calle 13|Calle 30|Bodega Sur|Girardot\s*[-–]\s*CND|111\s*1|I\s*II\s*III|U\s*II\s*l|004_\d+|CI004_'
-                  es_ruido = asunto_str.str.contains(patron_ruido, case=False, regex=True, na=False)
-                  es_gigante = asunto_str.str.len() > 180
-                  es_invalido = asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+                  # ERRORES CRÍTICOS A EXPULSAR PARA RE-TABULAR:
+                  # 1. En Recibidas, remitente y destinatario son iguales o remitente es Consorcio 4C
+                  error_entidades = es_recibida & (rem_str.str.contains('CONSORCIO 4C', case=False) | (rem_str == dest_str))
+                  # 2. En Recibidas, el asunto empieza con 'Ref.'
+                  error_ref_recibidas = es_recibida & asunto_str.str.startswith('Ref')
+                  # 3. Filas vacías o inválidas
+                  error_vacios = asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan'])
 
-                  malos = es_ruido | es_gigante | es_invalido
-                  df_sano = df[~malos].copy()
+                  malos = error_entidades | error_ref_recibidas | error_vacios
+                  df_sanas = df[~malos].copy()
+                  df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'🧹 Purga de Memoria de {carpeta}:')
-                  print(f'   - Cartas 100% limpias conservadas: {len(df_sano)}')
-                  print(f'   - Cartas con ruido de Gemini descartadas para re-tabular con Pixtral: {malos.sum()}')
+                  print(f'📋 Purga de Errores Críticos en {carpeta}:')
+                  print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
+                  print(f'   - Cartas con Remitente=Destinatario o Ref falso a corregir: {malos.sum()}')
 
-                  df_sano.to_csv(archivo_mem, index=False)
-                  for r in df_sano['UBICACION_ARCHIVO'].dropna():
+                  for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
 
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
-              print(f'🚀 A descargar y procesar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
+              print(f'🎯 A descargar para re-tabular: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
@@ -148,8 +154,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Checkpoint memoria depurada automático [skip ci]" || echo "Sin cambios"
+            git commit -m "Checkpoint correccion estricta entidades [skip ci]" || echo "Sin cambios"
             git push origin main || true
-          else
-            echo "🧪 Modo prueba: Memoria del repositorio no modificada."
           fi
