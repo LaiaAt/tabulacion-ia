@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (EXCLUSIVO MISTRAL PIXTRAL)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (EXCLUSIVO MISTRAL PIXTRAL + ENVÍO A GMAIL)
 # ==============================================================================
 
 import os
@@ -24,7 +24,7 @@ import pymupdf as fitz
 from PIL import Image
 import io
 
-print("⏳ [1/2] Verificando clave de Mistral AI...", flush=True)
+print("⏳ [1/2] Verificando credenciales...", flush=True)
 
 mistral_key = os.environ.get('MISTRAL_API_KEY', '').strip()
 if len(mistral_key) <= 10:
@@ -33,10 +33,10 @@ if len(mistral_key) <= 10:
 
 print("   ✅ Motor Pixtral conectado y listo.", flush=True)
 
-# MODELOS EXCLUSIVOS PIXTRAL
+# MODELOS OFICIALES PIXTRAL
 MODELOS_PIXTRAL = [
-    "pixtral-12b-2409",      # Modelo principal rápido de visión
-    "pixtral-large-latest"   # Modelo avanzado de visión de alta precisión
+    "pixtral-12b-2409",
+    "pixtral-large-latest"
 ]
 
 EMAIL_REMITENTE = os.environ.get('GMAIL_USER')
@@ -335,7 +335,6 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
 
     datos_completos = motor_cero_vacios(datos, pdf, txt, txt1, anio_doc, tipo)
 
-    # El producto NO contiene columnas técnicas
     fila = {
         "ÍTEM": item_num,
         "DEL FOLIO/PAGINAS": paginas,
@@ -352,7 +351,6 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, anio_doc, tipo, ruta_memoria, 
         pd.DataFrame([fila]).to_csv(ruta_memoria, mode='a', header=not os.path.exists(ruta_memoria), index=False)
 
     duracion = round(time.time() - t_inicio, 2)
-    # Solo el log de consola muestra el modelo de Pixtral usado
     print(f"📄 [Hilo-{hilo_id} | Pixtral: {mod_usado}] {pdf} | ⏱️ {duracion}s", flush=True)
     return True
 
@@ -366,13 +364,12 @@ def procesar_archivos():
 
     if es_prueba:
         limite = int(os.environ.get('LIMITE_PRUEBA', '1').strip())
-        etiqueta = f"PRUEBA_{limite}_archivos"
-        # Memoria y Excel aislados en prueba (NO lee ni altera la producción)
+        etiqueta = f"PRUEBA_{limite}_por_flujo"
         ruta_memoria = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_memoria_PRUEBA.csv')
         ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx')
         if os.path.exists(ruta_memoria): os.remove(ruta_memoria)
         if os.path.exists(ruta_excel): os.remove(ruta_excel)
-        print(f"🧪 MODO PRUEBA ACTIVO: Se tabularán únicamente {limite} archivo(s). Memoria de producción intacta.", flush=True)
+        print(f"🧪 MODO PRUEBA ACTIVO: Se tabularán {limite} de Enviadas y {limite} de Recibidas. Memoria intacta.", flush=True)
     else:
         limite = None
         etiqueta = f"{carpeta_objetivo}"
@@ -394,6 +391,7 @@ def procesar_archivos():
                     archivos.append((f, os.path.join(root, f), carpeta_objetivo))
 
         if not archivos:
+            print(f"ℹ️ No hay cartas descargadas para {tipo}.", flush=True)
             continue
 
         print(f"\n📂 Procesando {len(archivos)} carta(s) en {tipo}...", flush=True)
@@ -412,6 +410,10 @@ def procesar_archivos():
                 pass
 
     generar_excel_dos_hojas(ruta_memoria, ruta_excel)
+    
+    # ENVÍO AUTOMÁTICO DE CORREO
+    print("\n📧 Enviando correo con el archivo Excel...", flush=True)
+    enviar_correo_exito(ruta_excel, etiqueta)
     print("\n🏁 Proceso concluido.", flush=True)
 
 def sanitizar_df_excel(df_sub):
@@ -445,6 +447,43 @@ def generar_excel_dos_hojas(ruta_memoria, ruta_excel):
                 print(f"   📑 'Recibidas': {len(df_recibidas)} cartas | 'Radicadas': {len(df_radicadas)} cartas")
         except Exception as e:
             print(f"⚠️ Error al crear Excel: {e}", flush=True)
+
+def enviar_correo_exito(ruta_archivo, etiqueta):
+    if not EMAIL_REMITENTE or not EMAIL_PASSWORD:
+        print("⚠️ No se pudo enviar correo: Faltan GMAIL_USER o GMAIL_APP_PASSWORD en los Secretos.", flush=True)
+        return
+
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = f'✅ Tabulación Completa ({etiqueta}) - Excel con 2 Hojas'
+        msg['From'] = EMAIL_REMITENTE
+        msg['To'] = EMAIL_DESTINO
+        msg.set_content(
+            f'Hola,\n\n'
+            f'El proceso de tabulación con Mistral Pixtral ha finalizado exitosamente para {etiqueta}.\n\n'
+            f'Se adjunta el archivo Excel con las 2 hojas generadas ("Recibidas" y "Radicadas").\n\n'
+            f'Saludos cordiales.'
+        )
+
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(ruta_archivo)
+            msg.add_attachment(
+                file_data,
+                maintype='application',
+                subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=file_name
+            )
+        else:
+            print(f"⚠️ No se encontró el archivo Excel en {ruta_archivo} para adjuntar.", flush=True)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as smtp:
+            smtp.login(EMAIL_REMITENTE, EMAIL_PASSWORD)
+            smtp.send_message(msg)
+        print(f"🚀 ¡Correo enviado exitosamente a {EMAIL_DESTINO}!", flush=True)
+    except Exception as e:
+        print(f"❌ Error al enviar correo por Gmail: {e}", flush=True)
 
 if __name__ == "__main__":
     procesar_archivos()
