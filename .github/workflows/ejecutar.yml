@@ -13,11 +13,11 @@ on:
       limite_prueba:
         description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO?'
         required: false
-        default: '3'
+        default: '1'
       carpeta_objetivo:
-        description: 'Escribe el nombre de la carpeta a tabular (ej. "2017" o "2023")'
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2021" o "2017")'
         required: true
-        default: '2017'
+        default: '2021'
       reiniciar_memoria:
         description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
@@ -36,21 +36,23 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Instalar Python y Librerías
+      - name: Instalar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: |
+
+      - name: Instalar librerías
+        run: |
           pip install --upgrade pip
           pip install pymupdf pandas openpyxl requests Pillow
 
       - name: Instalar rclone
-        run: sudo apt-get update && sudo apt-get install -y rclone
+        run: sudo apt-get install -y rclone
 
       - name: Configurar acceso a Google Drive
         run: |
-          mkdir -p \~/.config/rclone
-          cat > \~/.config/rclone/rclone.conf << EOF
+          mkdir -p ~/.config/rclone
+          cat << EOF > ~/.config/rclone/rclone.conf
           [midrive]
           type = drive
           client_id = ${{ secrets.DRIVE_CLIENT_ID }}
@@ -58,10 +60,8 @@ jobs:
           scope = drive.readonly
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
-          echo "Configuración rclone creada:"
-          cat \~/.config/rclone/rclone.conf
 
-      - name: Preparación y Descarga al 100%
+      - name: Detección de Errores Críticos y Descarga Reparadora
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -70,50 +70,72 @@ jobs:
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
             rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
           else
-            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*\( {CARPETA}*/**.[pP][dD][fF]" --include "**/* \){CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
-            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*\( {CARPETA}*/**.[pP][dD][fF]" --include "**/* \){CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
           fi
 
-          python3 -c "
+          python -c "
           import os, random, pandas as pd
-          es_prueba = '${{ inputs.es_prueba }}'.lower() in ['si', 's', 'true']
-          limite = int('${{ inputs.limite_prueba }}' or 1)
-          reiniciar = '${{ inputs.reiniciar_memoria }}'.lower() in ['si', 's', 'true']
+
+          es_prueba = '${{ inputs.es_prueba }}'.strip().lower() in ['si', 's', 'true']
+          limite = int('${{ inputs.limite_prueba }}' or '1')
           carpeta = '${{ inputs.carpeta_objetivo }}'
-          archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+          reiniciar = '${{ inputs.reiniciar_memoria }}'.strip().lower() in ['si', 's', 'true']
 
-          with open('drive_enviadas.txt') as f: todos_env = [l.strip() for l in f if l.strip()]
-          with open('drive_recibidas.txt') as f: todos_rec = [l.strip() for l in f if l.strip()]
-
-          if reiniciar and os.path.exists(archivo_mem):
-              os.remove(archivo_mem)
-              print('Memoria borrada. Iniciando desde CERO.')
-
-          buenos = set()
-          if not es_prueba and os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
-              try:
-                  df = pd.read_csv(archivo_mem)
-                  for r in df['UBICACION_ARCHIVO'].dropna():
-                      buenos.add(os.path.basename(str(r).strip()).lower())
-              except Exception: pass
+          with open('drive_enviadas.txt') as f:
+              todos_env = [line.strip() for line in f if line.strip()]
+          with open('drive_recibidas.txt') as f:
+              todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
+              print(f'🧪 MODO PRUEBA: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
+              archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+              buenos = set()
+
+              if os.path.exists(archivo_mem) and not reiniciar and os.path.getsize(archivo_mem) > 0:
+                  df = pd.read_csv(archivo_mem)
+                  
+                  es_recibida = df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
+                  rem_str = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str)
+                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
+                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
+
+                  # ERRORES CRÍTICOS A EXPULSAR PARA RE-TABULAR:
+                  # 1. En Recibidas, remitente y destinatario son iguales o remitente es Consorcio 4C
+                  error_entidades = es_recibida & (rem_str.str.contains('CONSORCIO 4C', case=False) | (rem_str == dest_str))
+                  # 2. En Recibidas, el asunto empieza con 'Ref.'
+                  error_ref_recibidas = es_recibida & asunto_str.str.startswith('Ref')
+                  # 3. Filas vacías o inválidas
+                  error_vacios = asunto_str.str.strip().isin(['', 'NONE', 'N/A', 'nan'])
+
+                  malos = error_entidades | error_ref_recibidas | error_vacios
+                  df_sanas = df[~malos].copy()
+                  df_sanas.to_csv(archivo_mem, index=False)
+
+                  print(f'📋 Purga de Errores Críticos en {carpeta}:')
+                  print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
+                  print(f'   - Cartas con Remitente=Destinatario o Ref falso a corregir: {malos.sum()}')
+
+                  for r in df_sanas['UBICACION_ARCHIVO'].dropna():
+                      buenos.add(os.path.basename(str(r).strip()).lower())
+
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
+              print(f'🎯 A descargar para re-tabular: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
-          print(f'PDFs a procesar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
-
-          with open('descargar_enviadas.txt', 'w') as f: f.write('\n'.join(descargar_env))
-          with open('descargar_recibidas.txt', 'w') as f: f.write('\n'.join(descargar_rec))
+          with open('descargar_enviadas.txt', 'w') as f:
+              f.write('\n'.join(descargar_env))
+          with open('descargar_recibidas.txt', 'w') as f:
+              f.write('\n'.join(descargar_rec))
           "
 
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación 100% Visión
+      - name: Ejecutar la IA de Tabulación Pixtral
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -124,7 +146,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python script.py
 
-      - name: Guardar Memoria en GitHub
+      - name: Guardar Checkpoint de Memoria en GitHub
         if: always()
         run: |
           if [ "${{ inputs.es_prueba }}" != "si" ]; then
@@ -132,6 +154,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Tabulacion integral 100% Vision [skip ci]" || echo "Sin cambios"
+            git commit -m "Checkpoint correccion estricta entidades [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
