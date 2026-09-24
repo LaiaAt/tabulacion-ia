@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (CON SANITIZACIÓN PROFUNDA DE EXCEL)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (SOPORTE ESPECIALIZADO: EMAILS, FBTA Y DP)
 # ==============================================================================
 
 import os
@@ -85,41 +85,39 @@ def obtener_insumos_documento(ruta_pdf):
         return [], "", 0
 
 PROMPT_MAESTRO = """
-ACTÚA COMO UN AUDITOR Y EXTRACTOR DOCUMENTAL DE CORRESPONDENCIA CONTRACTUAL.
+ACTÚA COMO UN AUDITOR Y EXTRACTOR DOCUMENTAL ESPECIALIZADO.
 Analiza visualmente las imágenes del documento y extrae la información con FIDELIDAD ABSOLUTA.
 
-REGLAS DE ORO OBLIGATORIAS:
+REGLAS DE EXTRACCIÓN PARA CADA FORMATO:
 
 1. "razon_social_remitente":
-   - Es la entidad emisora según el LOGO O MEMBRETE DE LA PÁGINA 1.
-   - En cartas con logo de Consorcio 4C: "CONSORCIO 4C".
-   - En cartas con logo de Concesión: "CONCESIÓN ALTO MAGDALENA S.A.S.".
-   - En cartas con logo de ANI: "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI".
-   - NUNCA pongas nombres de personas ni "Atn.".
+   - CARTAS FORMALES: Mira el LOGO o membrete en la página 1 (ej. "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ S.A.").
+   - CORREOS ELECTRÓNICOS IMPRESOS (Emails): Mira la línea 'De:' o el dominio del correo remitente (ej. si es @fidubogota.com ➔ "FIDUCIARIA BOGOTÁ S.A.", si es @altomagdalena.com.co ➔ "CONCESIÓN ALTO MAGDALENA S.A.S.").
+   - NUNCA pongas "Atn." ni nombres de personas.
 
 2. "no_radicado_remitente":
-   - EN CARTAS DE CONSORCIO 4C (Radicadas): Está en la PÁGINA 1, arriba a la derecha (bajo el logo). Es un código como "CI.004/GPXXXX/XX/X.X" o "CI.004/XXXX/XX/X.X". Cópialo completo.
-   - EN CARTAS DE CONCESIÓN ALTO MAGDALENA (Recibidas): Búscalo en el sticker arriba a la derecha. El número impreso DEBAJO DEL CÓDIGO DE BARRAS es el radicado (Ej: "ALMA-2017-5207", "ALMA-2017-0199"). Cópialo con su prefijo ALMA-.
+   - CARTAS DE CONSORCIO 4C: Código en la página 1 arriba a la derecha (ej. "CI.004/GPXXXX/XX/X.X").
+   - CARTAS DE CONCESIÓN ALTO MAGDALENA: Número debajo del código de barras en el sticker (ej. "ALMA-2017-XXXX").
+   - CARTAS DE FIDUCIARIA BOGOTÁ: Búscalo VERTICALMENTE EN EL MARGEN IZQUIERDO (ej. "CSSA20200004021").
+   - CORREOS ELECTRÓNICOS O PETICIONES PARTICULARES SIN RADICADO DE SALIDA: Escribe exactamente "SIN NÚMERO".
 
 3. "razon_social_destinatario":
-   - Es la entidad a quien va dirigida la carta en la PÁGINA 1 (tras "Señores:").
-   - REGLA CRÍTICA: Extrae SOLO la entidad de la PÁGINA 1. PROHIBIDO tomar entidades que aparezcan en constancias, firmas o anexos de páginas posteriores.
-   - PROHIBIDO incluir "Atn.", "Ing.", "Doctor" o nombres de personas.
+   - En RECIBIDAS: Siempre es "CONSORCIO 4C".
+   - En RADICADAS: La entidad de la página 1 tras "Señores:" (sin nombres de personas ni "Atn.").
 
 4. "no_radicado_destinatario":
-   - Radicado o sticker que certifica la entrega:
-     * Si la carta fue enviada a CONCESIÓN ALTO MAGDALENA: Es el sticker de barras "ALMA-R-AAAA-XXXXX" impreso en la PÁGINA 1.
-     * Si fue enviada a la ANI: Es el número de radicado de entrada ANI (ej. 2017-409-XXXXXX o 2017409...).
-     * Si fue recibida por CONSORCIO 4C: Es el radicado GP (ej. "GP-6735").
+   - En RECIBIDAS: El radicado GP con el que Consorcio 4C sella el documento (ej. "GP-13256").
+   - En RADICADAS: El sticker de entrega de la entidad receptora (ej. "ALMA-R-AAAA-XXXXX" o radicado ANI).
 
 5. "fecha":
-   - Fecha de emisión de la carta en la PÁGINA 1 (Formato DD/MM/AAAA).
+   - En cartas: Fecha formal de la página 1 (DD/MM/AAAA).
+   - En correos electrónicos: Fecha de envío del correo electrónico (DD/MM/AAAA).
 
 6. "asunto":
-   - Copia literal del bloque de Asunto o Referencia:
-     * Si dice "Ref. Contrato...", copia todo el bloque completo comenzando con "Ref. ".
-     * Si dice "ASUNTO: XYZ", copia "XYZ" (sin la palabra ASUNTO:).
-     * PROHIBIDO copiar nombres de archivos técnicos (ej. CI004_...).
+   - En cartas recibidas: Si dice "ASUNTO: XYZ", transcribe "XYZ" (sin la palabra ASUNTO:).
+   - En correos electrónicos: Transcribe el Asunto / Subject del correo electrónico.
+   - En cartas radicadas: Si comienza con "Ref.", transcribe el bloque completo comenzando con "Ref. ".
+   - PROHIBIDO copiar nombres de archivos técnicos (ej. CI004_...).
 
 Devuelve ÚNICAMENTE un JSON válido:
 {
@@ -196,7 +194,6 @@ def limpiar_salida(val):
     if not val: return ""
     val = str(val).strip()
     if val.upper() in ["NONE", "NULL", "NAN", "", "NO IDENTIFICADO"]: return ""
-    # Eliminación de caracteres inválidos de OpenPyXL y caracteres de control ASCII
     val = ILLEGAL_CHARACTERS_RE.sub("", val)
     val = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', val)
     return val
@@ -214,51 +211,78 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
     ia_dest = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_dest).strip()
     ia_rem = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_rem).strip()
 
-    if "CI004_" in ia_asunto or len(ia_asunto) < 5:
+    if "CI004_" in ia_asunto or len(ia_asunto) < 4:
         ia_asunto = ""
 
     es_recibida = tipo_flujo == "RECIBIDAS"
 
     if es_recibida:
+        # ==================== RECIBIDAS ====================
         ia_dest = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_rem.upper(): ia_rem = ""
 
+        # Detección y Rescate de Remitente Multiformato
         if not ia_rem:
-            if "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower():
+            if "FBTA" in nombre_archivo or "fidubogota" in texto_completo.lower() or "fiduciaria bogot" in texto_completo.lower():
+                ia_rem = "FIDUCIARIA BOGOTÁ S.A."
+            elif "TRANSSURENCO" in nombre_archivo.upper() or "transsurenco" in texto_completo.lower():
+                ia_rem = "TRANS SURENCO S.A.S."
+            elif "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower():
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
             elif "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
                 ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
+            elif "INVIAS" in nombre_archivo.upper() or "invias" in texto_completo.lower():
+                ia_rem = "INSTITUTO NACIONAL DE VÍAS - INVIAS"
+            elif "CAR_" in nombre_archivo.upper() or "corporacion autonoma" in texto_completo.lower():
+                ia_rem = "CORPORACIÓN AUTÓNOMA REGIONAL DE CUNDINAMARCA - CAR"
 
+        # Radicado Destinatario GP
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
 
+        # Radicado Remitente
         if "CI.004" in rad_rem.upper() or "GP-" in rad_rem.upper():
             rad_rem = ""
 
         if not rad_rem:
-            m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
-            m_ani_rad = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*|Rad\s*No\.?\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
-            
-            if m_alma_txt:
-                rad_rem = m_alma_txt.group(1).replace(' ', '-')
-            elif m_ani_rad:
-                rad_rem = m_ani_rad.group(1).replace(' ', '')
+            if "SINNUMERO" in nombre_archivo.upper() or "sin numero" in texto_completo.lower():
+                rad_rem = "SIN NÚMERO"
+            elif "FBTA" in nombre_archivo.upper() or "CSSA" in texto_completo:
+                m_cssa = re.search(r'\b(CSSA\d{8,14})\b', texto_completo)
+                m_fbta_num = re.search(r'FBTA_(\d{4,8})', nombre_archivo)
+                if m_cssa: rad_rem = m_cssa.group(1)
+                elif m_fbta_num: rad_rem = f"CSSA{m_fbta_num.group(1)}"
             else:
-                m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
-                m_ani_file = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
-                anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2017"
-                if m_con_file:
-                    rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
-                elif m_ani_file:
-                    rad_rem = f"ANI-{m_ani_file.group(1)}"
+                m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
+                m_ani_rad = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*|Rad\s*No\.?\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
+                if m_alma_txt: rad_rem = m_alma_txt.group(1).replace(' ', '-')
+                elif m_ani_rad: rad_rem = m_ani_rad.group(1).replace(' ', '')
+                else:
+                    m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
+                    m_ani_file = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
+                    anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2020"
+                    if m_con_file: rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
+                    elif m_ani_file: rad_rem = f"ANI-{m_ani_file.group(1)}"
 
+        # Rescate de Asunto en Emails y Cartas
         if not ia_asunto:
+            m_email_subj = re.search(r'(?:Asunto|Subject)\s*:\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
+            m_email_bold = re.search(r'Correo de Interventor[^\n\r]*[-–]\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
             m_as = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_completo, re.IGNORECASE | re.DOTALL)
-            if m_as:
-                ia_asunto = " ".join(m_as.group(1).split()).strip()
+            if m_email_subj: ia_asunto = " ".join(m_email_subj.group(1).split()).strip()
+            elif m_email_bold: ia_asunto = " ".join(m_email_bold.group(1).split()).strip()
+            elif m_as: ia_asunto = " ".join(m_as.group(1).split()).strip()
+
+        # Rescate de Fecha en Emails
+        if not ia_fecha:
+            m_f_email = re.search(r'(\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})', texto_completo, re.IGNORECASE)
+            m_f_slash = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', texto_completo)
+            if m_f_email: ia_fecha = m_f_email.group(1)
+            elif m_f_slash: ia_fecha = m_f_slash.group(1)
 
     else:
+        # ==================== RADICADAS ====================
         ia_rem = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_dest.upper(): ia_dest = ""
 
@@ -268,24 +292,21 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
 
         if not rad_rem or "CI.004" not in rad_rem.upper():
             m_ci004 = re.search(r'(CI\.?\s*004[/\-\\][A-Z0-9]+[/\-\\]\d+[/\-\\][0-9.]+)', texto_completo, re.IGNORECASE)
-            if m_ci004:
-                rad_rem = m_ci004.group(1).replace(' ', '').strip()
+            if m_ci004: rad_rem = m_ci004.group(1).replace(' ', '').strip()
 
         if "ALTO MAGDALENA" in ia_dest.upper():
             if not rad_dest.startswith("ALMA-R-") or "2017409" in rad_dest or "202" in rad_dest:
                 m_almar = re.search(r'(ALMA-R-\d{4}-\d{4,6})', texto_completo, re.IGNORECASE)
-                if m_almar:
-                    rad_dest = m_almar.group(1)
+                if m_almar: rad_dest = m_almar.group(1)
         elif not rad_dest:
             m_ani = re.search(r'\b(20\d{2}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)\b', texto_completo)
-            if m_ani:
-                rad_dest = m_ani.group(1).replace(' ', '')
+            if m_ani: rad_dest = m_ani.group(1).replace(' ', '')
 
         if not ia_asunto or not ia_asunto.lower().startswith("ref"):
             m_ref = re.search(r'\b(Ref\.?|REFERENCIA)\s*[:\-]*\s*(.+?)(?=\n\s*(?:Respetados|Estimados|Señores|Cordial|De conformidad|Atentamente|$))', texto_completo, re.IGNORECASE | re.DOTALL)
-            if m_ref:
-                ia_asunto = "Ref. " + " ".join(m_ref.group(2).split()).strip()
+            if m_ref: ia_asunto = "Ref. " + " ".join(m_ref.group(2).split()).strip()
 
+    # Normalización de Fecha
     if not ia_fecha:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
         ia_fecha = m_f.group(1) if m_f else ""
@@ -346,7 +367,6 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, tipo, ruta_memoria, hilo_id, a
     return True
 
 def sanitizar_para_excel(val):
-    """Limpia todo carácter ilegal o no imprimible para openpyxl."""
     if not val or pd.isnull(val):
         return ""
     s = str(val)
@@ -362,11 +382,11 @@ def sanitizar_df_excel(df_sub):
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (CON SANITIZACIÓN ROBUSTA DE EXCEL)", flush=True)
+    print(" MOTOR RESTREPO_2 (SOPORTE AVANZADO MULTIFORMATO)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
-    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2017').strip()
+    carpeta_objetivo = os.environ.get('CARPETA_OBJETIVO', '2020').strip()
 
     limite = int(os.environ.get('LIMITE_PRUEBA', '1').strip()) if es_prueba else None
     etiqueta = f"PRUEBA_{limite}" if es_prueba else f"{carpeta_objetivo}"
@@ -375,7 +395,6 @@ def procesar_archivos():
 
     if es_prueba and os.path.exists(ruta_memoria): os.remove(ruta_memoria)
 
-    # Cargar memoria previa existente
     procesados_basenames = set()
     item_counter = 1
     if not es_prueba and os.path.exists(ruta_memoria):
@@ -383,7 +402,7 @@ def procesar_archivos():
             df_m = pd.read_csv(ruta_memoria)
             procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_m["UBICACION_ARCHIVO"].dropna())
             item_counter = len(df_m) + 1
-            print(f"✅ Memoria previa leída: {len(procesados_basenames)} cartas ya aseguradas.", flush=True)
+            print(f"✅ Memoria previa leída: {len(procesados_basenames)} cartas aseguradas.", flush=True)
         except Exception: pass
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
@@ -413,7 +432,7 @@ def procesar_archivos():
                 time.sleep(0.5)
             for f in as_completed(futuros): pass
 
-    # ENSAMBLAJE FINAL EXCEL SANITIZADO (CERO ERRORES DE CARACTERES)
+    # ENSAMBLAJE FINAL EXCEL
     if os.path.exists(ruta_memoria):
         try:
             df_final = pd.read_csv(ruta_memoria)
@@ -433,7 +452,7 @@ def procesar_archivos():
                     df_rec.to_excel(writer, sheet_name="Recibidas", index=False)
                     df_rad.to_excel(writer, sheet_name="Radicadas", index=False)
 
-                print(f"✅ Archivo Excel generado y sanitizado con éxito.", flush=True)
+                print(f"✅ Archivo Excel generado con éxito.", flush=True)
         except Exception as e:
             print(f"⚠️ Error generando Excel: {e}", flush=True)
 
@@ -444,7 +463,7 @@ def procesar_archivos():
             msg['Subject'] = f'✅ Tabulación Completa ({etiqueta})'
             msg['From'] = EMAIL_REMITENTE
             msg['To'] = EMAIL_DESTINO
-            msg.set_content(f'Proceso concluido exitosamente para {etiqueta}. El archivo Excel adjunto está completamente sanitizado.')
+            msg.set_content(f'Proceso concluido exitosamente para {etiqueta} con soporte multiformato.')
             if os.path.exists(ruta_excel):
                 with open(ruta_excel, 'rb') as f:
                     msg.add_attachment(f.read(), maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=os.path.basename(ruta_excel))
