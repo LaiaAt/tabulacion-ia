@@ -15,9 +15,9 @@ on:
         required: false
         default: '1'
       carpeta_objetivo:
-        description: 'Escribe el nombre de la carpeta a tabular (ej. "2023" o "2017")'
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2020" o "2017")'
         required: true
-        default: '2023'
+        default: '2020'
       reiniciar_memoria:
         description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Preparación y Descarga Continua
+      - name: Detección de Filas Vacías y Descarga de Rescate
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -79,42 +79,57 @@ jobs:
           limite = int('${{ inputs.limite_prueba }}' or '1')
           carpeta = '${{ inputs.carpeta_objetivo }}'
           reiniciar = '${{ inputs.reiniciar_memoria }}'.strip().lower() in ['si', 's', 'true']
-          archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
           with open('drive_enviadas.txt') as f:
               todos_env = [line.strip() for line in f if line.strip()]
           with open('drive_recibidas.txt') as f:
               todos_rec = [line.strip() for line in f if line.strip()]
 
-          if reiniciar and os.path.exists(archivo_mem):
-              os.remove(archivo_mem)
-              print('🗑️ Memoria borrada. Iniciando desde CERO.')
-
-          buenos = set()
-          if not es_prueba and os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
-              try:
-                  df = pd.read_csv(archivo_mem)
-                  for r in df['UBICACION_ARCHIVO'].dropna():
-                      buenos.add(os.path.basename(str(r).strip()).lower())
-              except Exception: pass
-
           if es_prueba:
+              print(f'🧪 MODO PRUEBA: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
+              archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+              buenos = set()
+
+              if reiniciar and os.path.exists(archivo_mem):
+                  os.remove(archivo_mem)
+                  print('🗑️ Memoria borrada. Iniciando desde cero.')
+
+              if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
+                  df = pd.read_csv(archivo_mem)
+                  
+                  # PURGA DE FILAS VACÍAS O INCOMPLETAS HEREDADAS
+                  asunto_vacio = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
+                  rem_vacio = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
+                  fecha_vacia = df['FECHA (DD/MM/AAAA)'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
+
+                  malos = asunto_vacio | rem_vacio | fecha_vacia
+                  df_sanas = df[~malos].copy()
+                  df_sanas.to_csv(archivo_mem, index=False)
+
+                  print(f'📋 Estado de la memoria de {carpeta}:')
+                  print(f'   - Cartas completas conservadas: {len(df_sanas)}')
+                  print(f'   - Cartas con celdas vacías expulsadas para re-tabular con Pixtral Large: {malos.sum()}')
+
+                  for r in df_sanas['UBICACION_ARCHIVO'].dropna():
+                      buenos.add(os.path.basename(str(r).strip()).lower())
+
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
+              print(f'🎯 A descargar para tabular con IA potente: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
-          print(f'🎯 PDFs pendientes por procesar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
-
-          with open('descargar_enviadas.txt', 'w') as f: f.write('\n'.join(descargar_env))
-          with open('descargar_recibidas.txt', 'w') as f: f.write('\n'.join(descargar_rec))
+          with open('descargar_enviadas.txt', 'w') as f:
+              f.write('\n'.join(descargar_env))
+          with open('descargar_recibidas.txt', 'w') as f:
+              f.write('\n'.join(descargar_rec))
           "
 
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación Maestra
+      - name: Ejecutar la IA de Tabulación Potente
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -133,6 +148,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Tabulacion MAESTRA 100% [skip ci]" || echo "Sin cambios"
+            git commit -m "Checkpoint re-tabulacion potente [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
