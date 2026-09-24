@@ -13,11 +13,11 @@ on:
       limite_prueba:
         description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO?'
         required: false
-        default: '1'
+        default: '3'
       carpeta_objetivo:
-        description: 'Escribe el nombre de la carpeta a tabular (ej. "2023" o "2017")'
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2017" o "2023")'
         required: true
-        default: '2023'
+        default: '2017'
       reiniciar_memoria:
         description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
@@ -49,8 +49,8 @@ jobs:
 
       - name: Configurar acceso a Google Drive
         run: |
-          mkdir -p ~/.config/rclone
-          cat << EOF > ~/.config/rclone/rclone.conf
+          mkdir -p \~/.config/rclone
+          cat << EOF > \~/.config/rclone/rclone.conf
           [midrive]
           type = drive
           client_id = ${{ secrets.DRIVE_CLIENT_ID }}
@@ -68,23 +68,20 @@ jobs:
             rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
             rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
           else
-            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
-            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*\( {CARPETA}*/**.[pP][dD][fF]" --include "**/* \){CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*\( {CARPETA}*/**.[pP][dD][fF]" --include "**/* \){CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
           fi
 
-          python -c "
+          python3 -c "
           import os, random, pandas as pd
-
-          es_prueba = '${{ inputs.es_prueba }}'.strip().lower() in ['si', 's', 'true']
-          limite = int('${{ inputs.limite_prueba }}' or '1')
+          es_prueba = '${{ inputs.es_prueba }}'.lower() in ['si', 's', 'true']
+          limite = int('${{ inputs.limite_prueba }}' or 1)
+          reiniciar = '${{ inputs.reiniciar_memoria }}'.lower() in ['si', 's', 'true']
           carpeta = '${{ inputs.carpeta_objetivo }}'
-          reiniciar = '${{ inputs.reiniciar_memoria }}'.strip().lower() in ['si', 's', 'true']
           archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
 
-          with open('drive_enviadas.txt') as f:
-              todos_env = [line.strip() for line in f if line.strip()]
-          with open('drive_recibidas.txt') as f:
-              todos_rec = [line.strip() for line in f if line.strip()]
+          with open('drive_enviadas.txt') as f: todos_env = [l.strip() for l in f if l.strip()]
+          with open('drive_recibidas.txt') as f: todos_rec = [l.strip() for l in f if l.strip()]
 
           if reiniciar and os.path.exists(archivo_mem):
               os.remove(archivo_mem)
@@ -114,7 +111,7 @@ jobs:
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar la IA de Tabulación 100% Estricta
+      - name: Ejecutar la IA de Tabulación 100% Visión
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -133,6 +130,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Tabulacion integral 100% [skip ci]" || echo "Sin cambios"
+            git commit -m "Tabulacion integral 100% Vision [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
