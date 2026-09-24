@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (ALTA RESOLUCIÓN + REGLAS ESTRICTAS DE PÁGINA 1)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (CON SANITIZACIÓN PROFUNDA DE EXCEL)
 # ==============================================================================
 
 import os
@@ -50,10 +50,6 @@ lock_keys = threading.Lock()
 cooldown_keys = {k: 0.0 for k in lista_keys}
 
 def obtener_insumos_documento(ruta_pdf):
-    """
-    Convierte las páginas a alta resolución (140 DPI) para que los stickers
-    y códigos pequeños debajo de códigos de barras sean totalmente legibles.
-    """
     try:
         doc = fitz.open(ruta_pdf)
         total_paginas = len(doc)
@@ -68,13 +64,11 @@ def obtener_insumos_documento(ruta_pdf):
         if total_paginas <= 4:
             paginas_a_procesar.update(range(total_paginas))
         else:
-            # Página 1 (la más importante), Página 2 y última página
             paginas_a_procesar.update([0, 1, total_paginas - 1])
 
         imagenes_b64 = []
         for i in sorted(list(paginas_a_procesar)):
             pagina = doc[i]
-            # 140 DPI para máxima nitidez de stickers
             pix = pagina.get_pixmap(dpi=140)
             img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
             if img.width > 1250:
@@ -114,7 +108,7 @@ REGLAS DE ORO OBLIGATORIAS:
 
 4. "no_radicado_destinatario":
    - Radicado o sticker que certifica la entrega:
-     * Si la carta fue enviada a CONCESIÓN ALTO MAGDALENA: Es el sticker de barras "ALMA-R-AAAA-XXXXX" impreso en la PÁGINA 1. (NO tomes radicados de la ANI si la carta fue enviada a la Concesión).
+     * Si la carta fue enviada a CONCESIÓN ALTO MAGDALENA: Es el sticker de barras "ALMA-R-AAAA-XXXXX" impreso en la PÁGINA 1.
      * Si fue enviada a la ANI: Es el número de radicado de entrada ANI (ej. 2017-409-XXXXXX o 2017409...).
      * Si fue recibida por CONSORCIO 4C: Es el radicado GP (ej. "GP-6735").
 
@@ -202,7 +196,10 @@ def limpiar_salida(val):
     if not val: return ""
     val = str(val).strip()
     if val.upper() in ["NONE", "NULL", "NAN", "", "NO IDENTIFICADO"]: return ""
-    return ILLEGAL_CHARACTERS_RE.sub("", val)
+    # Eliminación de caracteres inválidos de OpenPyXL y caracteres de control ASCII
+    val = ILLEGAL_CHARACTERS_RE.sub("", val)
+    val = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', val)
+    return val
 
 def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta, tipo_flujo):
     if not isinstance(datos, dict): datos = {}
@@ -214,39 +211,32 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
     ia_asunto = limpiar_salida(datos.get("asunto", ""))
     ia_fecha = limpiar_salida(datos.get("fecha", ""))
 
-    # Purga estricta de nombres y Atn. en entidades
     ia_dest = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_dest).strip()
     ia_rem = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_rem).strip()
 
-    # Si la IA copió el nombre de archivo técnico como asunto, lo anulamos para rescate
     if "CI004_" in ia_asunto or len(ia_asunto) < 5:
         ia_asunto = ""
 
     es_recibida = tipo_flujo == "RECIBIDAS"
 
     if es_recibida:
-        # ==================== RECIBIDAS ====================
         ia_dest = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_rem.upper(): ia_rem = ""
 
-        # Detección de Remitente
         if not ia_rem:
             if "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower():
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
             elif "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
                 ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
 
-        # Radicado Destinatario: Consorcio 4C (GP-XXXX) extraído del nombre de archivo
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
 
-        # Radicado Remitente de la entidad emisora
         if "CI.004" in rad_rem.upper() or "GP-" in rad_rem.upper():
             rad_rem = ""
 
         if not rad_rem:
-            # 1. Buscar en el texto digital
             m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
             m_ani_rad = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*|Rad\s*No\.?\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
             
@@ -255,7 +245,6 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
             elif m_ani_rad:
                 rad_rem = m_ani_rad.group(1).replace(' ', '')
             else:
-                # 2. Respaldo definitivo desde el nombre de archivo CON_XXXX
                 m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
                 m_ani_file = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
                 anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2017"
@@ -264,32 +253,25 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
                 elif m_ani_file:
                     rad_rem = f"ANI-{m_ani_file.group(1)}"
 
-        # Rescate de Asunto
         if not ia_asunto:
             m_as = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_completo, re.IGNORECASE | re.DOTALL)
             if m_as:
                 ia_asunto = " ".join(m_as.group(1).split()).strip()
 
     else:
-        # ==================== RADICADAS ====================
         ia_rem = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_dest.upper(): ia_dest = ""
 
-        # Corrección de Destinatario si se confundió con anexos de la ANI
         if "CON_" in nombre_archivo or "alto magdalena" in texto_completo[:1500].lower():
             if not ia_dest or "ANI" in ia_dest.upper() or "INFRAESTRUCTURA" in ia_dest.upper():
                 ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
-        # Radicado Remitente (CI.004 de Consorcio 4C)
         if not rad_rem or "CI.004" not in rad_rem.upper():
-            # Regex flexible para capturar el código completo aunque tenga variaciones de espaciado
             m_ci004 = re.search(r'(CI\.?\s*004[/\-\\][A-Z0-9]+[/\-\\]\d+[/\-\\][0-9.]+)', texto_completo, re.IGNORECASE)
             if m_ci004:
                 rad_rem = m_ci004.group(1).replace(' ', '').strip()
 
-        # Radicado Destinatario (Sticker de entrega)
         if "ALTO MAGDALENA" in ia_dest.upper():
-            # Si el destinatario es la Concesión, el radicado DEBE ser ALMA-R-, NUNCA de la ANI
             if not rad_dest.startswith("ALMA-R-") or "2017409" in rad_dest or "202" in rad_dest:
                 m_almar = re.search(r'(ALMA-R-\d{4}-\d{4,6})', texto_completo, re.IGNORECASE)
                 if m_almar:
@@ -299,13 +281,11 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
             if m_ani:
                 rad_dest = m_ani.group(1).replace(' ', '')
 
-        # Rescate de Asunto en Radicadas
         if not ia_asunto or not ia_asunto.lower().startswith("ref"):
             m_ref = re.search(r'\b(Ref\.?|REFERENCIA)\s*[:\-]*\s*(.+?)(?=\n\s*(?:Respetados|Estimados|Señores|Cordial|De conformidad|Atentamente|$))', texto_completo, re.IGNORECASE | re.DOTALL)
             if m_ref:
                 ia_asunto = "Ref. " + " ".join(m_ref.group(2).split()).strip()
 
-    # Normalización de Fecha
     if not ia_fecha:
         m_f = re.search(r'(?:Bogot[aá]|Girardot|Honda)[^\n\r]*,?\s*(\d{1,2}\s*de\s*[a-zA-Z]+\s*de\s*\d{4}|\d{2}[-/.]\d{2}[-/.]\d{4})', texto_completo, re.IGNORECASE)
         ia_fecha = m_f.group(1) if m_f else ""
@@ -365,9 +345,24 @@ def procesar_un_pdf(item_num, pdf, ruta_completa, tipo, ruta_memoria, hilo_id, a
     print(f"📄 [Hilo-{hilo_id} | {mod_usado}] {pdf} | ✅ OK ({duracion}s)", flush=True)
     return True
 
+def sanitizar_para_excel(val):
+    """Limpia todo carácter ilegal o no imprimible para openpyxl."""
+    if not val or pd.isnull(val):
+        return ""
+    s = str(val)
+    s = ILLEGAL_CHARACTERS_RE.sub("", s)
+    s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', s)
+    return s.strip()
+
+def sanitizar_df_excel(df_sub):
+    df_sub = df_sub.copy()
+    for col in df_sub.columns:
+        df_sub[col] = df_sub[col].apply(sanitizar_para_excel)
+    return df_sub
+
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (ALTA RESOLUCIÓN Y CORRECCIÓN TOTAL)", flush=True)
+    print(" MOTOR RESTREPO_2 (CON SANITIZACIÓN ROBUSTA DE EXCEL)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
@@ -380,7 +375,7 @@ def procesar_archivos():
 
     if es_prueba and os.path.exists(ruta_memoria): os.remove(ruta_memoria)
 
-    # Cargar memoria previa
+    # Cargar memoria previa existente
     procesados_basenames = set()
     item_counter = 1
     if not es_prueba and os.path.exists(ruta_memoria):
@@ -388,6 +383,7 @@ def procesar_archivos():
             df_m = pd.read_csv(ruta_memoria)
             procesados_basenames = set(os.path.basename(str(r).strip()).lower() for r in df_m["UBICACION_ARCHIVO"].dropna())
             item_counter = len(df_m) + 1
+            print(f"✅ Memoria previa leída: {len(procesados_basenames)} cartas ya aseguradas.", flush=True)
         except Exception: pass
 
     flujos = [("RECIBIDAS", RUTA_RECIBIDAS), ("RADICADAS", RUTA_ENVIADAS)]
@@ -417,22 +413,29 @@ def procesar_archivos():
                 time.sleep(0.5)
             for f in as_completed(futuros): pass
 
-    # ENSAMBLAJE FINAL EXCEL
+    # ENSAMBLAJE FINAL EXCEL SANITIZADO (CERO ERRORES DE CARACTERES)
     if os.path.exists(ruta_memoria):
-        df_final = pd.read_csv(ruta_memoria)
-        if not df_final.empty:
-            es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
-            df_rec = df_final[es_recibida].copy()
-            df_rad = df_final[~es_recibida].copy()
+        try:
+            df_final = pd.read_csv(ruta_memoria)
+            if not df_final.empty:
+                es_recibida = df_final["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)
+                df_rec = df_final[es_recibida].copy()
+                df_rad = df_final[~es_recibida].copy()
 
-            if not df_rec.empty:
-                df_rec["ÍTEM"] = range(1, len(df_rec) + 1)
-            if not df_rad.empty:
-                df_rad["ÍTEM"] = range(1, len(df_rad) + 1)
+                if not df_rec.empty:
+                    df_rec["ÍTEM"] = range(1, len(df_rec) + 1)
+                    df_rec = sanitizar_df_excel(df_rec)
+                if not df_rad.empty:
+                    df_rad["ÍTEM"] = range(1, len(df_rad) + 1)
+                    df_rad = sanitizar_df_excel(df_rad)
 
-            with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
-                df_rec.to_excel(writer, sheet_name="Recibidas", index=False)
-                df_rad.to_excel(writer, sheet_name="Radicadas", index=False)
+                with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
+                    df_rec.to_excel(writer, sheet_name="Recibidas", index=False)
+                    df_rad.to_excel(writer, sheet_name="Radicadas", index=False)
+
+                print(f"✅ Archivo Excel generado y sanitizado con éxito.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Error generando Excel: {e}", flush=True)
 
     # ENVÍO DE CORREO
     if EMAIL_REMITENTE and EMAIL_PASSWORD:
@@ -441,7 +444,7 @@ def procesar_archivos():
             msg['Subject'] = f'✅ Tabulación Completa ({etiqueta})'
             msg['From'] = EMAIL_REMITENTE
             msg['To'] = EMAIL_DESTINO
-            msg.set_content(f'Proceso concluido exitosamente con alta resolución y coherencia de radicación para {etiqueta}.')
+            msg.set_content(f'Proceso concluido exitosamente para {etiqueta}. El archivo Excel adjunto está completamente sanitizado.')
             if os.path.exists(ruta_excel):
                 with open(ruta_excel, 'rb') as f:
                     msg.add_attachment(f.read(), maintype='application', subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename=os.path.basename(ruta_excel))
