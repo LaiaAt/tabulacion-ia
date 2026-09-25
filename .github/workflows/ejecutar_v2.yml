@@ -15,9 +15,9 @@ on:
         required: false
         default: '1'
       carpeta_objetivo:
-        description: 'Escribe el nombre de la carpeta a tabular (ej. "2021")'
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2020")'
         required: true
-        default: '2021'
+        default: '2020'
       reiniciar_memoria:
         description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
         type: choice
@@ -42,9 +42,9 @@ jobs:
           python-version: '3.10'
       - run: |
           sudo apt-get update
-          sudo apt-get install -y rclone
+          sudo apt-get install -y rclone tesseract-ocr tesseract-ocr-spa
           pip install --upgrade pip
-          pip install pymupdf pandas openpyxl requests Pillow
+          pip install pymupdf pandas openpyxl requests Pillow pytesseract
 
       - name: Configurar acceso a Google Drive
         run: |
@@ -58,7 +58,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Cacería de "SIN NÚMERO" y Descarga Selectiva
+      - name: Detección de Asuntos Inventados y Descarga
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -88,7 +88,6 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
-              print(f'🧪 MODO PRUEBA V2: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
@@ -102,33 +101,31 @@ jobs:
 
               if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
                   try:
-                      # sep=None y engine='python' detecta si está separado por comas o punto y coma
                       df = pd.read_csv(archivo_mem, sep=None, engine='python')
-                      df.columns = df.columns.str.strip() # Limpia espacios ocultos
+                      df.columns = df.columns.str.strip()
                       
                       if 'UBICACION_ARCHIVO' in df.columns:
                           es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
-                          dest_str = df.get('RAZON SOCIAL DESTINATARIO', pd.Series(dtype=str)).fillna('').astype(str)
-                          rad_dest_str = df.get('No. RADICADO DESTINATARIO', pd.Series(dtype=str)).fillna('').astype(str)
+                          asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
 
-                          # CACERÍA EXACTA: Radicadas hacia la Concesión que quedaron SIN NÚMERO
-                          es_concesion = dest_str.str.contains('MAGDALENA', case=False)
-                          con_sin_almar = es_rad & es_concesion & (~rad_dest_str.str.contains('ALMA-R', case=False) | rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO|^$', case=False, regex=True))
+                          # DETECTAR ASUNTOS FALSOS INVENTADOS A PARTIR DEL NOMBRE DEL ARCHIVO
+                          asunto_falso = es_rad & asunto_str.str.contains(r'^Ref\.\s*(Ani|Con|Inv|Spt|Alcaldia)\b', case=False, regex=True)
+                          
+                          # Detectar Celdas Vacías
+                          asunto_vacio = asunto_str.str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
 
-                          malos = con_sin_almar
+                          malos = asunto_falso | asunto_vacio
                           df_sanas = df[~malos].copy()
                           df_sanas.to_csv(archivo_mem, index=False)
 
-                          print(f'📋 Cacería de Errores V2 en {carpeta}:')
-                          print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                          print(f'   - Cartas a re-descargar para que la IA las lea: {malos.sum()}')
+                          print(f'📋 Cacería de Asuntos Falsos en {carpeta}:')
+                          print(f'   - Cartas conservadas: {len(df_sanas)}')
+                          print(f'   - Cartas con Asunto Falso a re-descargar para leer la carta real: {malos.sum()}')
 
                           for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                               buenos.add(os.path.basename(str(r).strip()).lower())
-                      else:
-                          print('⚠️ La memoria CSV está dañada o no tiene formato correcto. Se procesará todo el año.')
                   except Exception as e:
-                      print(f'⚠️ Advertencia al leer memoria (Posible Excel corrupto): {e}')
+                      pass
 
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
@@ -143,7 +140,7 @@ jobs:
           rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
           rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
 
-      - name: Ejecutar script_v2.py (Poder de Visión IA)
+      - name: Ejecutar script_v2.py
         env:
           ES_PRUEBA: ${{ inputs.es_prueba }}
           LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
@@ -162,6 +159,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Extraccion visual 100% IA [skip ci]" || echo "Sin cambios"
+            git commit -m "Correccion Asuntos Falsos Radicadas [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
