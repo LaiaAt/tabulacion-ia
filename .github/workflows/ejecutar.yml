@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección de Errores en Radicadas y Descarga Selectiva
+      - name: Detección y Descarga de Cartas con Inconsistencias
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -103,26 +103,27 @@ jobs:
                   es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
                   dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
                   rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
-                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
+                  nom_str = df['UBICACION_ARCHIVO'].fillna('').astype(str)
 
-                  # 1. Radicadas a Concesión que no tienen ALMA-R (ej. tienen SIN NÚMERO o radicado ANI)
-                  es_con = dest_str.str.contains('ALTO MAGDALENA', case=False)
-                  con_sin_almar = es_rad & es_con & ~rad_dest_str.str.contains('ALMA-R', case=False)
+                  # 1. FILAS 105, 210, 318, 716, 750: Destinatario ANI con radicado ALMA-R erróneo
+                  ani_con_almar = es_rad & dest_str.str.contains('ANI|INFRAESTRUCTURA', case=False) & rad_dest_str.str.contains('ALMA-R', case=False)
 
-                  # 2. Radicadas a la ANI que quedaron con SIN NÚMERO
-                  es_ani = dest_str.str.contains('ANI|INFRAESTRUCTURA', case=False)
-                  ani_sin_num = es_rad & es_ani & rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO', case=False)
+                  # 2. FILA 513: Destinatario Concesión con radicado de la ANI (2020409...) o SIN NÚMERO
+                  con_con_ani = es_rad & dest_str.str.contains('MAGDALENA', case=False) & rad_dest_str.str.contains(r'20\d{2}', regex=True)
 
-                  # 3. Asuntos que se tragaron la carta entera (más de 260 caracteres)
-                  asunto_gigante = es_rad & (asunto_str.str.len() > 260)
+                  # 3. Filas con Destinatario vacío
+                  dest_vacio = es_rad & dest_str.str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
 
-                  malos = con_sin_almar | ani_sin_num | asunto_gigante
+                  # 4. Archivos específicos señalados
+                  archivos_foco = nom_str.str.contains('755620|792420|749720|800920|839820|873020|869020', regex=True)
+
+                  malos = ani_con_almar | con_con_ani | dest_vacio | archivos_foco
                   df_sanas = df[~malos].copy()
                   df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'📋 Detección de Errores en {carpeta}:')
+                  print(f'📋 Purga Quirúrgica en {carpeta}:')
                   print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas con errores a re-descargar y reparar: {malos.sum()}')
+                  print(f'   - Cartas con incoherencias a re-descargar de Drive: {malos.sum()}')
 
                   for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
@@ -159,6 +160,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Correccion definitiva de ALMA-R y radicados limpios [skip ci]" || echo "Sin cambios"
+            git commit -m "Correccion estricta de coherencia radicado destinatario [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
