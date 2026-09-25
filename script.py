@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (SANEAMIENTO CRUZADO DEFINITIVO DE RADICADOS)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (EXTRACCIÓN QUIRÚRGICA DE RADICADOS EN RADICADAS)
 # ==============================================================================
 
 import os
@@ -67,16 +67,9 @@ def obtener_insumos_documento(ruta_pdf):
             if any(k in txt_low for k in ["radicó con éxito", "número de radicado es", "alma-r-", "ventanilla unica", "atencionciudadano@invias", "numero de radicado"]):
                 paginas_con_constancia.append(idx)
 
-        texto_pag1 = doc[0].get_text().lower()
-        es_caratula = bool("oficio remisorio" in texto_pag1 or "al contestar cite el numero" in texto_pag1 or "radicado via web" in texto_pag1)
-
-        paginas_a_procesar = []
-        if es_caratula and total_paginas > 1:
-            paginas_a_procesar.extend([1, 0])
-            if total_paginas > 2: paginas_a_procesar.append(2)
-        else:
-            paginas_a_procesar.extend([0, 1] if total_paginas > 1 else [0])
-
+        # Enviar siempre Pág 1 (índice 0) y Pág 2 (índice 1) para capturar carátulas y cartas completas
+        paginas_a_procesar = [0]
+        if total_paginas > 1: paginas_a_procesar.append(1)
         paginas_a_procesar.extend(paginas_con_constancia)
         paginas_a_procesar.append(total_paginas - 1)
 
@@ -107,7 +100,7 @@ Analiza visualmente las imágenes del documento y extrae la información con MÁ
 REGLAS DE ORO OBLIGATORIAS:
 
 1. "razon_social_remitente":
-   - Entidad emisora según el LOGO de la página 1 (ej. "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI", "CONCESIÓN ALTO MAGDALENA S.A.S.", "CONSORCIO 4C").
+   - Entidad emisora según el LOGO de la carta formal (ej. "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI", "CONCESIÓN ALTO MAGDALENA S.A.S.", "CONSORCIO 4C").
    - NUNCA pongas nombres de personas ni "Atn.".
 
 2. "no_radicado_remitente":
@@ -120,26 +113,26 @@ REGLAS DE ORO OBLIGATORIAS:
 3. "razon_social_destinatario":
    - En RECIBIDAS: Siempre es "CONSORCIO 4C".
    - En RADICADAS: La entidad tras "Señores:" de la carta real (ej. "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI" o "CONCESIÓN ALTO MAGDALENA S.A.S.").
-     * NUNCA incluyas nombres de personas ni cargos.
 
 4. "no_radicado_destinatario":
    - En RECIBIDAS: El radicado GP con el que Consorcio 4C sella el documento (ej. "GP-13414").
-   - En RADICADAS (REGLAS DE COHERENCIA ESTRICTA):
+   - En RADICADAS (REGLAS ESTRICTAS DE COHERENCIA):
      * SI FUE ENVIADA A CONCESIÓN ALTO MAGDALENA: El radicado de entrega SIEMPRE es "ALMA-R-AAAA-XXXX".
-       Búscalo en el sticker de la página 1 O en el correo de confirmación de las páginas posteriores ('Su número de radicado es ALMA-R-...').
-       PROHIBIDO colocar números de la ANI si la carta fue enviada a la Concesión.
-     * SI FUE ENVIADA A LA ANI: Es el número de radicado de la ANI (ej. "20204090424842", "2020-409-075265-2").
+       Búscalo en el sticker físico de la página 1 O en el correo de confirmación de las páginas posteriores.
+       PROHIBIDO colocar números de la ANI si la carta fue enviada a Concesión Alto Magdalena.
+     * SI FUE ENVIADA A LA ANI: Es el número de radicado de la ANI (ej. "20204090424842", "20204090119622").
+       Búscalo en la carátula remisoria de la página 1 o sticker.
        PROHIBIDO incluir prefijos "ANI", "ANI No." o "ANI Numero de Radicado". SOLO EL NÚMERO LIMPIO.
        PROHIBIDO colocar códigos "ALMA-R-" si la carta fue enviada a la ANI.
 
 5. "fecha":
-   - Fecha de la carta o del correo electrónico (Formato DD/MM/AAAA).
+   - Fecha de la carta (Formato DD/MM/AAAA).
 
 6. "asunto":
    - En cartas de Consorcio 4C (Radicadas): Transcribe el bloque de Asunto/Referencia que empieza por "Ref. Contrato...".
-     * DETÉN LA COPIA ANTES DEL SALUDO ("Respetados Señores:", "Respetada Señora:", etc.). PROHIBIDO copiar el cuerpo de la carta.
+     * DETÉN LA COPIA ANTES DEL SALUDO ("Respetados Señores:", "Respetada Señora:", etc.).
    - En cartas recibidas: Si dice "ASUNTO: XYZ", transcribe "XYZ" (sin la palabra ASUNTO:).
-   - NUNCA pongas códigos técnicos de archivos (CI004_..., acta-retrib...).
+   - NUNCA pongas códigos técnicos de archivos (CI004_...).
 
 Devuelve ÚNICAMENTE un JSON válido:
 {
@@ -229,7 +222,7 @@ def extraer_radicado_destinatario_radicadas_profundo(texto_completo, dest_entida
     dest_upper = dest_entidad.upper()
 
     # 1. HACIA CONCESIÓN ALTO MAGDALENA: SIEMPRE ALMA-R, NUNCA NÚMERO DE LA ANI
-    if "ALTO MAGDALENA" in dest_upper:
+    if "MAGDALENA" in dest_upper:
         m_const = re.search(r'(?:número de radicado es|radicado es|radicó con éxito[^\.\n]*?)\s*(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d{3,5})', texto_completo, re.IGNORECASE)
         if m_const: return m_const.group(1).replace(' ', '-')
 
@@ -252,16 +245,6 @@ def extraer_radicado_destinatario_radicadas_profundo(texto_completo, dest_entida
 
         m_ani_hyphen = re.search(r'\b(20\d{2}[-\s]\d{3}[-\s]\d{6}[-\s]\d)\b', texto_completo)
         if m_ani_hyphen: return m_ani_hyphen.group(1).replace(' ', '-')
-
-    # 3. HACIA INVIAS
-    elif "INVIAS" in dest_upper or "VIAS" in dest_upper:
-        m_inv = re.search(r'(?:radicada con el n[uú]mero|radicado(?: con el)? n[uú]mero)\s*[:\s]*(\d{4,8})', texto_completo, re.IGNORECASE)
-        if m_inv: return m_inv.group(1)
-
-    # 4. HACIA SUPERTRANSPORTE
-    elif "SUPERTRANSPORTE" in dest_upper or "PUERTOS" in dest_upper or "TRANSPORTE" in dest_upper:
-        m_sup = re.search(r'(?:radicado el d[íi]a de hoy bajo el N[°o]\s*[:\s]*|radicado[^\.\n]*?N[°o]\s*[:\s]*)(\d{10,16})', texto_completo, re.IGNORECASE)
-        if m_sup: return m_sup.group(1)
 
     return ""
 
@@ -311,7 +294,7 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
     ia_dest = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_dest).strip()
     ia_rem = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_rem).strip()
 
-    if re.search(r'\bC[IL]004\b', ia_asunto, re.IGNORECASE) or re.search(r'\b070\d{3}\b', ia_asunto) or "CI004_" in ia_asunto or "acta-retrib" in ia_asunto.lower() or len(ia_asunto) > 280 or len(ia_asunto) < 5:
+    if re.search(r'\bC[IL]004\b', ia_asunto, re.IGNORECASE) or re.search(r'\b070\d{3}\b', ia_asunto) or "CI004_" in ia_asunto or len(ia_asunto) > 280 or len(ia_asunto) < 5:
         ia_asunto = ""
 
     es_recibida = tipo_flujo == "RECIBIDAS"
@@ -357,6 +340,10 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
             m_email_subj = re.search(r'(?:Asunto|Subject)\s*:\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
             if m_as: ia_asunto = " ".join(m_as.group(1).split()).strip()
             elif m_email_subj: ia_asunto = " ".join(m_email_subj.group(1).split()).strip()
+            else:
+                nom = os.path.basename(nombre_archivo).replace(".pdf", "")
+                nom = re.sub(r'^CI004_.*?_\d+_', '', nom, flags=re.IGNORECASE)
+                ia_asunto = nom.replace("_", " ").capitalize()
 
         if not ia_fecha:
             m_f_univ = re.search(r'(\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})', texto_completo, re.IGNORECASE)
@@ -370,10 +357,10 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
         ia_rem = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_dest.upper(): ia_dest = ""
 
-        # DETERMINACIÓN DE DESTINATARIO: PREVALECE EL TEXTO DE LA PÁGINA 1
+        # DETERMINACIÓN DE DESTINATARIO
         if re.search(r'Señor(?:es)?\s*:?[^\n\r]*\n?\s*(?:AGENCIA|ANI|INFRAESTRUCTURA)', texto_completo[:1500], re.IGNORECASE):
             ia_dest = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
-        elif re.search(r'Señor(?:es)?\s*:?[^\n\r]*\n?\s*(?:CONCESI[OÓ]N|ALTO MAGDALENA)', texto_completo[:1500], re.IGNORECASE):
+        elif re.search(r'Señor(?:es)?\s*:?[^\n\r]*\n?\s*(?:CONCESI[OÓ]N|ALTO\s*MAGDALENA|ALTOMAGDALENA)', texto_completo[:1500], re.IGNORECASE):
             ia_dest = "CONCESIÓN ALTO MAGDALENA S.A.S."
 
         if not ia_dest:
@@ -392,24 +379,28 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
         rad_dest = re.sub(r'^(?:ANI\s*Numero\s*de\s*Radicado\s*[:\-\.]*|ANI\s*No\.?\s*[:\-\.]*|ANI\s*[:\-\.]*|ANI\s+)', '', rad_dest, flags=re.IGNORECASE).strip()
 
         # REGLAS DE COHERENCIA DESTINATARIO vs RADICADO
+        # Si va a la ANI, NUNCA puede tener ALMA-R
         if "ANI" in ia_dest.upper() and "ALMA-R" in rad_dest.upper():
             rad_dest = ""
 
-        if "ALTO MAGDALENA" in ia_dest.upper() and re.search(r'^\s*20\d{2}', rad_dest):
+        # Si va a Concesión Alto Magdalena, NUNCA puede tener número de la ANI
+        if "MAGDALENA" in ia_dest.upper() and re.search(r'^\s*20\d{2}', rad_dest):
             rad_dest = ""
 
+        # Extracción profunda si quedó vacío o inconsistente
         if not rad_dest or rad_dest.upper() in ["NO IDENTIFICADO", "SIN NÚMERO", "SIN NUMERO", ""]:
             rad_hallado = extraer_radicado_destinatario_radicadas_profundo(texto_completo, ia_dest)
             if rad_hallado: rad_dest = rad_hallado
             else: rad_dest = "SIN NÚMERO"
 
-        # Rescate de Asunto
+        # Asunto limpio
         asunto_rescatado = rescatar_asunto_completo_radicadas(texto_completo)
         if asunto_rescatado:
             ia_asunto = asunto_rescatado
         elif not ia_asunto or not ia_asunto.lower().startswith("ref"):
-            m_ref = re.search(r'\b(Ref\.?|REFERENCIA)\s*[:\-]*\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
-            if m_ref: ia_asunto = "Ref. " + m_ref.group(2).strip()
+            nom = os.path.basename(nombre_archivo).replace(".pdf", "")
+            nom = re.sub(r'^CI004_.*?_\d+_', '', nom, flags=re.IGNORECASE)
+            ia_asunto = "Ref. " + nom.replace("_", " ").capitalize()
 
         if not ia_fecha:
             m_f_univ = re.search(r'(\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})', texto_completo, re.IGNORECASE)
@@ -418,7 +409,7 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
             elif m_f_slash: ia_fecha = m_f_slash.group(1)
             else: ia_fecha = f"01/01/{anio_carpeta}"
 
-    # Normalización de Fecha
+    # Normalización de Fecha universal
     m1 = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', ia_fecha)
     if m1: ia_fecha = f"{int(m1.group(3)):02d}/{int(m1.group(2)):02d}/{m1.group(1)}"
     m2 = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', ia_fecha)
@@ -491,10 +482,10 @@ def sanitizar_df_excel(df_sub):
 def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
     """
     AUTO-SANADOR TOTAL:
-    1. Quita la palabra 'ANI' del radicado destinatario en Radicadas a TODAS las filas.
-    2. Rescata los ALMA-R de las constancias digitales de Concesión en Radicadas.
-    3. Si va a la ANI, elimina ALMA-R erróneos y rescata el radicado de la ANI de la pág 1.
-    4. Corrige los asuntos de correos que traían 'acta-retrib'.
+    Corrige los casos donde el PDF está en disco:
+    - Fila 513: Lee la pág 1 y extrae ALMA-R-2020-0411.
+    - Filas 105, 210, etc.: Lee la carátula y extrae los radicados reales de la ANI.
+    - Purgar cualquier prefijo ANI en Columna F.
     """
     if not os.path.exists(ruta_memoria): return
     try:
@@ -507,9 +498,7 @@ def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
             es_rec = "recibidas" in nom_arch.lower()
             rad_dest = str(row.get("No. RADICADO DESTINATARIO", "")).strip()
             dest_ent = str(row.get("RAZON SOCIAL DESTINATARIO", "")).upper()
-            asunto_act = str(row.get("ASUNTO / TIPO DOCUMENTAL", "")).strip()
 
-            # EN RADICADAS:
             if not es_rec:
                 # 1. PURGA UNIVERSAL DE 'ANI' EN COLUMNA F
                 if re.search(r'^\s*ANI\b', rad_dest, re.IGNORECASE):
@@ -517,14 +506,7 @@ def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
                     rad_dest = df_m.at[idx, "No. RADICADO DESTINATARIO"]
                     modificados += 1
 
-                # 2. Corregir destinatario si estaba vacío
-                if not dest_ent or dest_ent in ["NAN", "NONE"]:
-                    if "_ANI_" in nom_arch.upper():
-                        df_m.at[idx, "RAZON SOCIAL DESTINATARIO"] = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
-                        dest_ent = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
-                        modificados += 1
-
-                # 3. Cartas a la ANI con ALMA-R erróneo (filas 105, 210, 318, 716, 750)
+                # 2. FILAS 105, 210, etc: Destinatario ANI con ALMA-R erróneo
                 if ("ANI" in dest_ent or "INFRAESTRUCTURA" in dest_ent) and "ALMA-R" in rad_dest:
                     ruta_pdf = os.path.join(RUTA_BASE, nom_arch)
                     if os.path.exists(ruta_pdf):
@@ -539,8 +521,8 @@ def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
                                 modificados += 1
                         except: pass
 
-                # 4. Cartas a Concesión con radicado ANI erróneo o SIN NÚMERO
-                if "ALTO MAGDALENA" in dest_ent and (re.search(r'^\s*20\d{2}', rad_dest) or rad_dest in ["SIN NÚMERO", "SIN NUMERO", "NO IDENTIFICADO", ""]):
+                # 3. FILA 513: Destinatario Concesión con radicado ANI erróneo
+                if "MAGDALENA" in dest_ent and re.search(r'^\s*20\d{2}', rad_dest):
                     ruta_pdf = os.path.join(RUTA_BASE, nom_arch)
                     if os.path.exists(ruta_pdf):
                         try:
@@ -551,21 +533,6 @@ def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
                             rad_alma_real = extraer_radicado_destinatario_radicadas_profundo(t_full, dest_ent)
                             if rad_alma_real:
                                 df_m.at[idx, "No. RADICADO DESTINATARIO"] = rad_alma_real
-                                modificados += 1
-                        except: pass
-
-                # 5. Arreglar asuntos que se tragaron la carta entera o nombres de archivo
-                if len(asunto_act) > 280 or "acta-retrib" in asunto_act.lower() or "Respetada Señora:" in asunto_act:
-                    ruta_pdf = os.path.join(RUTA_BASE, nom_arch)
-                    if os.path.exists(ruta_pdf):
-                        try:
-                            d_doc = fitz.open(ruta_pdf)
-                            t_full = ""
-                            for p in d_doc: t_full += p.get_text() + "\n"
-                            d_doc.close()
-                            asunto_corto = rescatar_asunto_completo_radicadas(t_full)
-                            if asunto_corto:
-                                df_m.at[idx, "ASUNTO / TIPO DOCUMENTAL"] = asunto_corto
                                 modificados += 1
                         except: pass
 
@@ -709,14 +676,14 @@ def procesar_archivos():
     if EMAIL_REMITENTE and EMAIL_PASSWORD:
         try:
             msg = EmailMessage()
-            msg['Subject'] = f'✅ Tabulación Verificada 100% ({etiqueta}) - Radicados y Asuntos Saneados'
+            msg['Subject'] = f'✅ Tabulación Verificada 100% ({etiqueta}) - Saneamiento Total'
             msg['From'] = EMAIL_REMITENTE
             msg['To'] = EMAIL_DESTINO
             msg.set_content(
                 f'Hola,\n\n'
                 f'El proceso para {etiqueta} ha finalizado con ÉXITO Y CONCILIACIÓN FÍSICA TOTAL.\n\n'
                 f'{reporte_validacion}\n'
-                f'Se corrigió la coherencia estricta entre Destinatario y Radicados en Radicadas, se eliminaron todos los prefijos ANI y se sanearon los asuntos.\n\n'
+                f'Se corrigió la extracción de radicados oficiales de entrega (ALMA-R- para Concesión y número largo para la ANI).\n\n'
                 f'Saludos cordiales.'
             )
             if os.path.exists(ruta_excel):
