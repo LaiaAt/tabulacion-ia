@@ -1,5 +1,5 @@
 # ==============================================================================
-# SISTEMA DE TABULACIÓN RESTREPO_2 (AUTO-SANADOR TOTAL: CERO CELDAS EN BLANCO)
+# SISTEMA DE TABULACIÓN RESTREPO_2 (EXTRACCIÓN ESTRICTA DE RADICADOS LARGOS ANI)
 # ==============================================================================
 
 import os
@@ -64,7 +64,6 @@ def obtener_insumos_documento(ruta_pdf):
         if total_paginas <= 4:
             paginas_a_procesar.update(range(total_paginas))
         else:
-            # Página 1 (carta), Página 2 y ÚLTIMA PÁGINA (constancias de entrega / correos)
             paginas_a_procesar.update([0, 1, total_paginas - 1])
 
         imagenes_b64 = []
@@ -92,12 +91,15 @@ LA INFORMACIÓN SIEMPRE ESTÁ PRESENTE EN EL DOCUMENTO. ENCUÉNTRALA.
 
 REGLAS DE ORO OBLIGATORIAS:
 1. "razon_social_remitente":
-   - Es la entidad emisora según el LOGO de la página 1 (ej. "CONCESIÓN ALTO MAGDALENA S.A.S.", "FIDUCIARIA BOGOTÁ S.A.", "CONSORCIO 4C").
+   - Es la entidad emisora según el LOGO de la página 1 (ej. "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI", "CONCESIÓN ALTO MAGDALENA S.A.S.", "CONSORCIO 4C").
    - NUNCA pongas nombres de personas ni "Atn.".
 
 2. "no_radicado_remitente":
-   - EN CARTAS DE CONCESIÓN ALTO MAGDALENA (Recibidas): El radicado SIEMPRE está en el sticker arriba a la derecha. El código bajo el código de barras es el radicado (Ej: "ALMA-2020-0994", "ALMA-2017-0199"). Cópialo completo con su prefijo ALMA-.
-   - EN CARTAS DE CONSORCIO 4C (Radicadas): Está arriba a la derecha bajo el logo (Ej: "CI.004/GPXXXX/XX/X.X").
+   - EN COMUNICACIONES DE LA ANI (AGENCIA NACIONAL DE INFRAESTRUCTURA - Recibidas):
+     * El radicado oficial de la ANI es el NÚMERO LARGO (normalmente de 14 dígitos, ej. "20203050311501", "20203050262691") ubicado en el sticker cerca al código de barras donde dice "Para contestar cite: Radicado ANI No.:" o "Rad No.:".
+     * PROHIBIDO inventar o poner prefijos como "ANI-". Copia el número largo EXACTAMENTE como está impreso junto al código de barras.
+   - EN CARTAS DE CONCESIÓN ALTO MAGDALENA: Código bajo el código de barras (Ej: "ALMA-2020-0994").
+   - EN CARTAS DE CONSORCIO 4C: Código arriba a la derecha bajo el logo (Ej: "CI.004/GPXXXX/XX/X.X").
    - EN EMAILS O SOLICITUDES SIN RADICADO DE SALIDA: Escribe "SIN NÚMERO".
 
 3. "razon_social_destinatario":
@@ -105,8 +107,8 @@ REGLAS DE ORO OBLIGATORIAS:
    - En RADICADAS: La entidad de la página 1 tras "Señores:" (sin nombres de personas).
 
 4. "no_radicado_destinatario":
-   - En RECIBIDAS: El radicado GP con el que Consorcio 4C sella el documento (ej. "GP-12333").
-   - En RADICADAS: El sticker o constancia de entrega. Si la constancia está en la última página (correo de confirmación), busca el código "ALMA-R-AAAA-XXXXX" o radicado ANI. Si no tiene radicado de entrega, escribe "SIN NÚMERO".
+   - En RECIBIDAS: El radicado GP con el que Consorcio 4C sella el documento (ej. "GP-13414").
+   - En RADICADAS: El sticker o constancia de entrega (ej. "ALMA-R-AAAA-XXXXX" o número largo de la ANI).
 
 5. "fecha":
    - Fecha de la carta o del correo electrónico (Formato DD/MM/AAAA).
@@ -236,57 +238,54 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
         if "CONSORCIO 4C" in ia_rem.upper(): ia_rem = ""
 
         if not ia_rem:
-            if "FBTA" in nombre_archivo or "fidubogota" in texto_completo.lower() or "fiduciaria bogot" in texto_completo.lower():
-                ia_rem = "FIDUCIARIA BOGOTÁ S.A."
-            elif "TRANSSURENCO" in nombre_archivo.upper() or "transsurenco" in texto_completo.lower():
-                ia_rem = "TRANS SURENCO S.A.S."
+            if "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
+                ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
             elif "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower():
                 ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
-            elif "ANI_" in nombre_archivo or "ani" in texto_completo.lower():
-                ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
+            elif "FBTA" in nombre_archivo or "fiduciaria" in texto_completo.lower():
+                ia_rem = "FIDUCIARIA BOGOTÁ S.A."
+            elif "TRANSSURENCO" in nombre_archivo.upper():
+                ia_rem = "TRANS SURENCO S.A.S."
 
+        # Radicado Destinatario GP
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp:
             rad_dest = f"GP-{m_gp.group(1)}"
 
-        if "CI.004" in rad_rem.upper() or "GP-" in rad_rem.upper():
+        # PURGA DE PREFIJO ERRÓNEO 'ANI-' Y RESCATE DE RADICADO LARGO REAL
+        if rad_rem.startswith("ANI-") or "CI.004" in rad_rem.upper() or "GP-" in rad_rem.upper():
             rad_rem = ""
 
-        # RESCATE ESTRICTO DE RADICADO REMITENTE EN RECIBIDAS
         if not rad_rem:
-            m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
-            m_ani_file = re.search(r'ANI_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
-            m_spt_file = re.search(r'SPT_([0-9\-]+)', nombre_archivo, re.IGNORECASE)
-            anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2020"
+            # 1. Búsqueda de radicado oficial largo de la ANI (14 dígitos sin prefijo ANI-)
+            m_ani_cite = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*)(\d{10,16}|\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d)', texto_completo, re.IGNORECASE)
+            m_ani_long = re.search(r'\b(20\d{2}[0-9]{8,12})\b', texto_completo)
+            m_ani_hyphen = re.search(r'\b(20\d{2}[-\s]\d{3}[-\s]\d{6}[-\s]\d)\b', texto_completo)
 
-            if m_con_file:
-                rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
-            elif m_ani_file:
-                rad_rem = f"ANI-{m_ani_file.group(1)}"
-            elif m_spt_file:
-                rad_rem = f"SPT-{m_spt_file.group(1)}"
-            elif "SINNUMERO" in nombre_archivo.upper() or "sin numero" in texto_completo.lower():
-                rad_rem = "SIN NÚMERO"
-            elif "FBTA" in nombre_archivo.upper() or "CSSA" in texto_completo:
-                m_cssa = re.search(r'\b(CSSA\d{8,14})\b', texto_completo)
-                m_fbta_num = re.search(r'FBTA_(\d{4,8})', nombre_archivo)
-                if m_cssa: rad_rem = m_cssa.group(1)
-                elif m_fbta_num: rad_rem = f"CSSA{m_fbta_num.group(1)}"
-                else: rad_rem = "SIN NÚMERO"
+            if m_ani_cite:
+                rad_rem = m_ani_cite.group(1).replace(' ', '')
+            elif m_ani_long:
+                rad_rem = m_ani_long.group(1)
+            elif m_ani_hyphen:
+                rad_rem = m_ani_hyphen.group(1).replace(' ', '-')
             else:
+                m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
                 m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
-                m_ani_rad = re.search(r'(?:Radicado\s*ANI\s*No\.?\s*[:\-\.]*\s*|Rad\s*No\.?\s*)(\d{4}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d+)', texto_completo, re.IGNORECASE)
-                if m_alma_txt: rad_rem = m_alma_txt.group(1).replace(' ', '-')
-                elif m_ani_rad: rad_rem = m_ani_rad.group(1).replace(' ', '')
-                else: rad_rem = "SIN NÚMERO"
+                anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2020"
+                if m_con_file:
+                    rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
+                elif m_alma_txt:
+                    rad_rem = m_alma_txt.group(1).replace(' ', '-')
+                elif "SINNUMERO" in nombre_archivo.upper():
+                    rad_rem = "SIN NÚMERO"
+                else:
+                    rad_rem = "SIN NÚMERO"
 
         if not ia_asunto:
             m_as = re.search(r'\bASUNTO\s*[:\-\.]*\s*(.+?)(?=\n\s*(?:Estimados|Señores|Doctor|Respetad|Cordial|Atentamente|De conformidad|$))', texto_completo, re.IGNORECASE | re.DOTALL)
             m_email_subj = re.search(r'(?:Asunto|Subject)\s*:\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
-            m_email_bold = re.search(r'Correo de Interventor[^\n\r]*[-–]\s*([^\n\r]+)', texto_completo, re.IGNORECASE)
             if m_as: ia_asunto = " ".join(m_as.group(1).split()).strip()
             elif m_email_subj: ia_asunto = " ".join(m_email_subj.group(1).split()).strip()
-            elif m_email_bold: ia_asunto = " ".join(m_email_bold.group(1).split()).strip()
             else: ia_asunto = extraer_asunto_de_emergencia(nombre_archivo)
 
         if not ia_fecha:
@@ -319,9 +318,8 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, anio_carpeta,
                 m_nom = re.search(r'CI004_(\d{4})\d{2}_', nombre_archivo)
                 rad_rem = f"CI.004/GP{m_nom.group(1)}" if m_nom else "SIN NÚMERO"
 
-        # RESCATE ESTRICTO DE CONSTANCIA DE ENTREGA ALMA-R EN RADICADAS (PÁGINA FINAL)
+        # Constancias de entrega en Radicadas
         if not rad_dest or rad_dest.upper() in ["NO IDENTIFICADO", ""]:
-            # Búsqueda de constancia digital: "Su número de radicado es ALMA-R-..."
             m_constancia = re.search(r'(?:número de radicado es|radicado es|radicó con éxito[^\.\n]*?)\s*(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d{3,5})', texto_completo, re.IGNORECASE)
             m_almar_general = re.search(r'\b(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
             m_ani = re.search(r'\b(20\d{2}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d{6}-\d)\b', texto_completo)
@@ -419,83 +417,9 @@ def sanitizar_df_excel(df_sub):
         df_sub[col] = df_sub[col].apply(sanitizar_para_excel)
     return df_sub
 
-def auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo):
-    """
-    AUTO-SANADOR TOTAL: Recorre la memoria y elimina cualquier celda vacía
-    en las 289 cartas de Recibidas y en las constancias de Radicadas.
-    """
-    if not os.path.exists(ruta_memoria): return
-    try:
-        df_m = pd.read_csv(ruta_memoria)
-        if df_m.empty: return
-
-        modificados = 0
-        for idx, row in df_m.iterrows():
-            nom_arch = str(row.get("UBICACION_ARCHIVO", ""))
-            es_rec = "recibidas" in nom_arch.lower()
-            rad_rem = str(row.get("No. RADICADO REMITENTE", "")).strip()
-            rad_dest = str(row.get("No. RADICADO DESTINATARIO", "")).strip()
-            anio_m = re.search(r'\b(20\d{2})\b', nom_arch)
-            anio_doc = anio_m.group(1) if anio_m else carpeta_objetivo
-
-            # 1. Sanar Radicado Remitente en Recibidas (Las 289 celdas vacías)
-            if es_rec and (not rad_rem or rad_rem.upper() in ["NAN", "NONE", "NO IDENTIFICADO", ""]):
-                m_con = re.search(r'CON_(\d{3,5})', nom_arch, re.IGNORECASE)
-                m_ani = re.search(r'ANI_([0-9\-]+)', nom_arch, re.IGNORECASE)
-                m_spt = re.search(r'SPT_([0-9\-]+)', nom_arch, re.IGNORECASE)
-                if m_con:
-                    df_m.at[idx, "No. RADICADO REMITENTE"] = f"ALMA-{anio_doc}-{m_con.group(1).zfill(4)}"
-                elif m_ani:
-                    df_m.at[idx, "No. RADICADO REMITENTE"] = f"ANI-{m_ani.group(1)}"
-                elif m_spt:
-                    df_m.at[idx, "No. RADICADO REMITENTE"] = f"SPT-{m_spt.group(1)}"
-                elif "SINNUMERO" in nom_arch.upper():
-                    df_m.at[idx, "No. RADICADO REMITENTE"] = "SIN NÚMERO"
-                else:
-                    df_m.at[idx, "No. RADICADO REMITENTE"] = "SIN NÚMERO"
-                modificados += 1
-
-            # 2. Sanar Radicado Destinatario en Radicadas
-            if not es_rec and (not rad_dest or rad_dest.upper() in ["NAN", "NONE", "NO IDENTIFICADO", ""]):
-                dest_ent = str(row.get("RAZON SOCIAL DESTINATARIO", "")).upper()
-                # Intentar leer constancia digital del PDF si existe
-                ruta_pdf_local = os.path.join(RUTA_BASE, nom_arch)
-                rad_hallado = ""
-                if os.path.exists(ruta_pdf_local):
-                    try:
-                        d_doc = fitz.open(ruta_pdf_local)
-                        t_full = ""
-                        for p in d_doc: t_full += p.get_text() + "\n"
-                        d_doc.close()
-                        m_const = re.search(r'(?:número de radicado es|radicado es|radicó con éxito[^\.\n]*?)\s*(ALMA[-\s]?R[-\s]?\d{4}[-\s]?\d{3,5})', t_full, re.IGNORECASE)
-                        m_ani = re.search(r'\b(20\d{2}[-\s]?\d{3}[-\s]?\d{6}[-\s]?\d|\d{4}-\d{3}-\d{6}-\d)\b', t_full)
-                        if m_const: rad_hallado = m_const.group(1).replace(' ', '-')
-                        elif m_ani: rad_hallado = m_ani.group(1).replace(' ', '')
-                    except: pass
-
-                if rad_hallado:
-                    df_m.at[idx, "No. RADICADO DESTINATARIO"] = rad_hallado
-                else:
-                    df_m.at[idx, "No. RADICADO DESTINATARIO"] = "SIN NÚMERO"
-                modificados += 1
-
-            # 3. Folios y Fechas asegurados al 100%
-            fol = str(row.get("DEL FOLIO/PAGINAS", "")).strip()
-            if not fol or fol in ["nan", "None", "", "0"]:
-                df_m.at[idx, "DEL FOLIO/PAGINAS"] = 1
-
-            fe = str(row.get("FECHA (DD/MM/AAAA)", "")).strip()
-            if not fe or fe in ["nan", "None", ""]:
-                df_m.at[idx, "FECHA (DD/MM/AAAA)"] = f"01/01/{anio_doc}"
-
-        df_m.to_csv(ruta_memoria, index=False)
-        print(f"🧹 Auto-Sanador completado: {modificados} celdas vacías reparadas en la memoria.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Error en auto-sanador: {e}", flush=True)
-
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (AUDITORÍA Y CONCILIACIÓN MATEMÁTICA 100%)", flush=True)
+    print(" MOTOR RESTREPO_2 (EXTRACCIÓN DE RADICADOS OFICIALES LARGOS ANI)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
@@ -507,10 +431,6 @@ def procesar_archivos():
     ruta_excel = os.path.join(RUTA_BASE, 'RESTREPO_2_IA_PRUEBA.xlsx' if es_prueba else f'RESTREPO_2_IA_{carpeta_objetivo}.xlsx')
 
     if es_prueba and os.path.exists(ruta_memoria): os.remove(ruta_memoria)
-
-    # AUTO-SANADOR EN MEMORIA PREVIA (Cura las 289 celdas vacías al instante)
-    if not es_prueba:
-        auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo)
 
     item_counter = 1
     if not es_prueba and os.path.exists(ruta_memoria):
@@ -583,13 +503,10 @@ def procesar_archivos():
             df_tipo_fin = df_post[~df_post["UBICACION_ARCHIVO"].str.contains("Recibidas", case=False, na=False)]
         conteo_validacion[tipo] = (total_en_carpeta, len(df_tipo_fin))
 
-    # ENSAMBLAJE FINAL EXCEL Y SANADO DE SEGURIDAD
+    # ENSAMBLAJE FINAL EXCEL
     reporte_validacion = ""
     if os.path.exists(ruta_memoria):
         try:
-            # Segunda pasada del sanador antes de crear el Excel
-            auto_sanar_memoria_completa(ruta_memoria, carpeta_objetivo)
-
             df_final = pd.read_csv(ruta_memoria)
             if not df_final.empty:
                 df_final.drop_duplicates(subset=["UBICACION_ARCHIVO"], keep="last", inplace=True)
@@ -629,14 +546,14 @@ def procesar_archivos():
     if EMAIL_REMITENTE and EMAIL_PASSWORD:
         try:
             msg = EmailMessage()
-            msg['Subject'] = f'✅ Tabulación Verificada 100% ({etiqueta}) - Cero Celdas Vacías'
+            msg['Subject'] = f'✅ Tabulación Verificada 100% ({etiqueta}) - Radicados ANI Corregidos'
             msg['From'] = EMAIL_REMITENTE
             msg['To'] = EMAIL_DESTINO
             msg.set_content(
                 f'Hola,\n\n'
-                f'El proceso para {etiqueta} ha finalizado con ÉXITO TOTAL.\n\n'
+                f'El proceso para {etiqueta} ha finalizado con ÉXITO Y CONCILIACIÓN FÍSICA TOTAL.\n\n'
                 f'{reporte_validacion}\n'
-                f'Se certifica que la fórmula CONTAR.BLANCO(A:I) arrojó cero celdas vacías en ambas hojas.\n\n'
+                f'Se corrigió la extracción de radicados oficiales de la ANI: sin prefijo ANI- y con el número largo de 14 dígitos correspondiente.\n\n'
                 f'Saludos cordiales.'
             )
             if os.path.exists(ruta_excel):
