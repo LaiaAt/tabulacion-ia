@@ -58,7 +58,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección de Asuntos Inventados y Descarga
+      - name: Detección de Asuntos Falsos Generales y Descarga
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -108,19 +108,22 @@ jobs:
                           es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
                           asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
 
-                          # DETECTAR ASUNTOS FALSOS INVENTADOS A PARTIR DEL NOMBRE DEL ARCHIVO
-                          asunto_falso = es_rad & asunto_str.str.contains(r'^Ref\.\s*(Ani|Con|Inv|Spt|Alcaldia)\b', case=False, regex=True)
+                          # CAZADOR UNIVERSAL DE ASUNTOS FALSOS (ANI, CONCESION, INVIAS, ETC)
+                          # Atrapa: 'Ref. Ani...', 'Ref. Con...', 'Ref. Spt...', 'Ref. Alcaldia...'
+                          asunto_falso = es_rad & asunto_str.str.contains(r'^Ref\.\s*(Ani|Con|Inv|Spt|Alcaldia|Trans|Fidu)\b', case=False, regex=True)
                           
-                          # Detectar Celdas Vacías
+                          # Atrapa cualquier asunto que tenga un código técnico de archivo escondido
+                          asunto_tecnico = es_rad & asunto_str.str.contains(r'CI004|CL004|070404|070210|070108|050300|ANI_SANEA', case=False, regex=True)
+
                           asunto_vacio = asunto_str.str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
 
-                          malos = asunto_falso | asunto_vacio
+                          malos = asunto_falso | asunto_tecnico | asunto_vacio
                           df_sanas = df[~malos].copy()
                           df_sanas.to_csv(archivo_mem, index=False)
 
-                          print(f'📋 Cacería de Asuntos Falsos en {carpeta}:')
-                          print(f'   - Cartas conservadas: {len(df_sanas)}')
-                          print(f'   - Cartas con Asunto Falso a re-descargar para leer la carta real: {malos.sum()}')
+                          print(f'📋 Cacería de Asuntos Falsos Universales en {carpeta}:')
+                          print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
+                          print(f'   - Cartas con Asunto Falso a re-descargar y reparar: {malos.sum()}')
 
                           for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                               buenos.add(os.path.basename(str(r).strip()).lower())
@@ -159,6 +162,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Correccion Asuntos Falsos Radicadas [skip ci]" || echo "Sin cambios"
+            git commit -m "Correccion UNIVERSAL de Asuntos Falsos Radicadas [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
