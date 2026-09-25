@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección y Descarga de Asuntos CI004 y Carátulas
+      - name: Detección de Cartas sin ALMA-R y Descarga Reparadora
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -100,22 +100,25 @@ jobs:
               if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
                   df = pd.read_csv(archivo_mem)
                   
-                  asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
-                  rad_rem_str = df['No. RADICADO REMITENTE'].fillna('').astype(str)
+                  es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
+                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
+                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
 
-                  # 1. Asuntos con CI004, CL004 o nombres de archivo
-                  error_asunto_codigo = asunto_str.str.contains('C[IL]004|070404|070210|ANI_SANEA', case=False)
+                  # 1. Radicadas enviadas a Concesión Alto Magdalena con 'SIN NÚMERO' a re-descargar para extraer ALMA-R
+                  es_concesion = dest_str.str.contains('ALTO MAGDALENA', case=False)
+                  sin_almar = es_rad & es_concesion & (rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO', case=False) | ~rad_dest_str.str.contains('ALMA-R', case=False))
 
-                  # 2. Filas que tienen 'ANI ' en radicado remitente
-                  error_ani_prefijo = rad_rem_str.str.contains(r'^\s*ANI\b', case=False, regex=True)
+                  # 2. Radicadas enviadas a INVIAS o Supertransporte con 'SIN NÚMERO'
+                  es_tercero_recibo = dest_str.str.contains('INVIAS|SUPERTRANSPORTE|PUERTOS', case=False)
+                  sin_recibo_tercero = es_rad & es_tercero_recibo & rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO', case=False)
 
-                  malos = error_asunto_codigo | error_ani_prefijo
+                  malos = sin_almar | sin_recibo_tercero
                   df_sanas = df[~malos].copy()
                   df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'📋 Detección de Errores en {carpeta}:')
+                  print(f'📋 Detección de Radicados Faltantes en {carpeta}:')
                   print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas con Asunto CI004 o prefijo ANI a corregir: {malos.sum()}')
+                  print(f'   - Cartas enviadas a Concesión/INVIAS/Supertransporte a re-descargar para extraer radicado real: {malos.sum()}')
 
                   for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
@@ -152,6 +155,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Correccion de Asuntos CI004 y radicados ANI [skip ci]" || echo "Sin cambios"
+            git commit -m "Extraccion de ALMA-R y limpieza de prefijo ANI [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
