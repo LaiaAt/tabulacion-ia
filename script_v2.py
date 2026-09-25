@@ -222,6 +222,8 @@ def limpiar_salida(val):
     if not val: return ""
     val = str(val).strip()
     if val.upper() in ["NONE", "NULL", "NAN", "", "NO IDENTIFICADO"]: return ""
+    val = re.sub(r'\(No visible[^\)]*\)', '', val, flags=re.IGNORECASE)
+    val = re.sub(r'\(se asume[^\)]*\)', '', val, flags=re.IGNORECASE)
     val = ILLEGAL_CHARACTERS_RE.sub("", val)
     val = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', val)
     return val.strip()
@@ -265,7 +267,7 @@ def rescatar_asunto_completo_radicadas(texto_completo):
     frenando ANTES del saludo o del cuerpo de la carta.
     """
     m_ref = re.search(
-        r'\b(?:Ref\.?|REFERENCIA)\s*[:\-]*\s*(.+?)(?=\n\s*(?:Respetad[oa]s?|Estimad[oa]s?|Señor(?:es|a)?|Doctor(?:a)?|Ingenier[oa]|Cordial|De conformidad|Atentamente|Atendiendo|Hacemos referencia|En atención|Con relación|\n\s*\n|$))',
+        r'\b(?:Ref\.?|REFERENCIA)\s*[:\-]*\s*(.+?)(?=\n\s*(?:Respetad[oa]s?|Estimad[oa]s?|Señor(?:es|a)?|Doctor(?:a)?|Ingenier[oa]|Cordial|De conformidad|Atentamente|Atendiendo|Hacemos referencia|En atención|Comunicamos que|\n\s*\n|$))',
         texto_completo,
         re.IGNORECASE | re.DOTALL
     )
@@ -297,7 +299,7 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, texto_sticker
     ia_dest = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_dest).strip()
     ia_rem = re.sub(r'(?i)[,.\-\s]*(Atn|Atención|Attn|Att|A la atención|Ing\.|Gerente|Representante|Dra?\.?).*', '', ia_rem).strip()
 
-    # BLOQUEO DE NOMBRES DE ARCHIVO EN EL ASUNTO
+    # BLOQUEO TERMINANTE DE C[IL]004 EN EL ASUNTO
     if re.search(r'\bC[IL]004\b', ia_asunto, re.IGNORECASE) or "CI004_" in ia_asunto:
         ia_asunto = ""
 
@@ -312,10 +314,12 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, texto_sticker
             if "ANI_" in nombre_archivo or "ani" in texto_completo.lower(): ia_rem = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
             elif "CON_" in nombre_archivo or "alto magdalena" in texto_completo.lower(): ia_rem = "CONCESIÓN ALTO MAGDALENA S.A.S."
             elif "FBTA" in nombre_archivo or "fiduciaria" in texto_completo.lower(): ia_rem = "FIDUCIARIA BOGOTÁ S.A."
+            elif "TRANSSURENCO" in nombre_archivo.upper(): ia_rem = "TRANS SURENCO S.A.S."
 
         m_gp = re.search(r'GP[-_]?(\d{3,6})', nombre_archivo, re.IGNORECASE)
         if m_gp: rad_dest = f"GP-{m_gp.group(1)}"
 
+        # PURGA DE CI004 Y 'ANI' EN RECIBIDAS
         if "CI004" in rad_rem.upper() or "CI.004" in rad_rem.upper() or "GP-" in rad_rem.upper():
             rad_rem = ""
         rad_rem = re.sub(r'^(?:ANI\s*Numero\s*de\s*Radicado\s*[:\-\.]*|ANI\s*No\.?\s*[:\-\.]*|ANI\s*[:\-\.]*|ANI\s+)', '', rad_rem, flags=re.IGNORECASE).strip()
@@ -326,8 +330,10 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, texto_sticker
                 if ani_num: rad_rem = ani_num
             elif "CONCESIÓN" in ia_rem.upper() or "CON_" in nombre_archivo:
                 m_con_file = re.search(r'CON_(\d{3,5})', nombre_archivo, re.IGNORECASE)
+                m_alma_txt = re.search(r'\b(ALMA[-\s]?20\d{2}[-\s]?\d{3,5})\b', texto_completo, re.IGNORECASE)
                 anio_doc = anio_carpeta if str(anio_carpeta).isdigit() else "2020"
-                if m_con_file: rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
+                if m_alma_txt: rad_rem = m_alma_txt.group(1).replace(' ', '-')
+                elif m_con_file: rad_rem = f"ALMA-{anio_doc}-{m_con_file.group(1).zfill(4)}"
 
             if not rad_rem: rad_rem = "SIN NÚMERO"
 
@@ -342,6 +348,7 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, texto_sticker
         ia_rem = "CONSORCIO 4C"
         if "CONSORCIO 4C" in ia_dest.upper(): ia_dest = ""
 
+        # Destinatario según el encabezado de la carta real
         if re.search(r'Señor(?:es)?\s*:?[^\n\r]*\n?\s*(?:AGENCIA|ANI|INFRAESTRUCTURA)', texto_completo[:1500], re.IGNORECASE):
             ia_dest = "AGENCIA NACIONAL DE INFRAESTRUCTURA - ANI"
         elif re.search(r'Señor(?:es)?\s*:?[^\n\r]*\n?\s*(?:CONCESI[OÓ]N|ALTO\s*MAGDALENA|ALTOMAGDALENA)', texto_completo[:1500], re.IGNORECASE):
@@ -368,12 +375,10 @@ def blindaje_logica_negocio(datos, nombre_archivo, texto_completo, texto_sticker
             if rad_hallado: rad_dest = rad_hallado
             else: rad_dest = "SIN NÚMERO"
 
-        # EXTRACCIÓN DE ASUNTO REAL EN RADICADAS
-        # Solo se recurre a la regex si la IA falló o devolvió CI004
-        if not ia_asunto or "CI004" in ia_asunto.upper() or len(ia_asunto) < 5:
-            asunto_rescatado = rescatar_asunto_completo_radicadas(texto_completo)
-            if asunto_rescatado:
-                ia_asunto = asunto_rescatado
+        # RESCATE PRIORITARIO DE LA CARTA FORMAL (PÁGINA 2)
+        asunto_rescatado = rescatar_asunto_completo_radicadas(texto_completo)
+        if asunto_rescatado:
+            ia_asunto = asunto_rescatado
 
     if not ia_fecha:
         m_f_univ = re.search(r'(\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})', texto_completo, re.IGNORECASE)
@@ -453,7 +458,7 @@ def sanitizar_df_excel(df_sub):
 
 def procesar_archivos():
     print("\n" + "="*70, flush=True)
-    print(" MOTOR RESTREPO_2 (VERSIÓN 2: LECTURA FIEL Y REPARACIÓN)", flush=True)
+    print(" MOTOR RESTREPO_2 (AUDITORÍA Y CONCILIACIÓN MATEMÁTICA 100%)", flush=True)
     print("="*70, flush=True)
 
     es_prueba = os.environ.get('ES_PRUEBA', 'no').strip().lower() in ['si', 's', 'true']
@@ -565,7 +570,7 @@ def procesar_archivos():
                 
                 reporte_validacion = (
                     f"\n{'='*70}\n"
-                    f"📊 REPORTE DE CONCILIACIÓN FÍSICA V2 (100% AUDITADO):\n"
+                    f"📊 REPORTE DE CONCILIACIÓN FÍSICA (100% AUDITADO):\n"
                     f"{'='*70}\n"
                     f"📥 RECIBIDAS : {tot_rec_files} archivos en carpeta ===> {len(df_rec)} filas en Excel (100%)\n"
                     f"📤 RADICADAS : {tot_rad_files} archivos en carpeta ===> {len(df_rad)} filas en Excel (100%)\n"
@@ -580,14 +585,14 @@ def procesar_archivos():
     if EMAIL_REMITENTE and EMAIL_PASSWORD:
         try:
             msg = EmailMessage()
-            msg['Subject'] = f'✅ Tabulación Verificada V2 ({etiqueta}) - Asuntos Reales y Limpios'
+            msg['Subject'] = f'✅ Tabulación Verificada V2 ({etiqueta}) - Asuntos Fieles de Carta Real'
             msg['From'] = EMAIL_REMITENTE
             msg['To'] = EMAIL_DESTINO
             msg.set_content(
                 f'Hola,\n\n'
-                f'El proceso V2 para {etiqueta} ha finalizado con ÉXITO.\n\n'
+                f'El proceso para {etiqueta} ha finalizado con ÉXITO Y CONCILIACIÓN TOTAL.\n\n'
                 f'{reporte_validacion}\n'
-                f'Se corrigió la extracción del Asunto real de la página 2 en Radicadas y se purgaron los códigos de archivo falsos (Ref. Ani..., CI004...).\n\n'
+                f'Se corrigieron los asuntos de las cartas formales (Ref. Contrato...) y se eliminaron los Asuntos falsos y códigos de archivo.\n\n'
                 f'Saludos cordiales.'
             )
             if os.path.exists(ruta_excel):
