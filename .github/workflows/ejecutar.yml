@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección de Errores ANI y Descarga Reparadora
+      - name: Detección y Descarga de Cartas ANI y CI004
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -86,7 +86,6 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
-              print(f'🧪 MODO PRUEBA: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
@@ -102,22 +101,24 @@ jobs:
                   
                   es_recibida = df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
                   rad_rem_str = df['No. RADICADO REMITENTE'].fillna('').astype(str)
+                  rem_str = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str)
+                  nom_str = df['UBICACION_ARCHIVO'].fillna('').astype(str)
 
-                  # 1. PURGAR LAS CARTAS CON PREFIJO ERRÓNEO 'ANI-' (Las 145 cartas)
-                  error_ani_falso = es_recibida & rad_rem_str.str.startswith('ANI-')
+                  # 1. Cartas de la ANI con SIN NÚMERO o ANI-
+                  es_ani = rem_str.str.contains('ANI|INFRAESTRUCTURA', case=False) | nom_str.str.contains('ANI_', case=False)
+                  ani_sin_num = es_recibida & es_ani & (rad_rem_str.str.contains('SIN NÚMERO|SIN NUMERO|ANI-', case=False) | rad_rem_str.str.strip().isin(['', 'nan', 'None']))
 
-                  # 2. Celdas vacías críticas
-                  asunto_vacio = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
-                  rem_vacio = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
-                  fecha_vacia = df['FECHA (DD/MM/AAAA)'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
+                  # 2. Cartas en Recibidas con CI004 en radicado remitente
+                  ci004_en_rec = es_recibida & rad_rem_str.str.contains('CI\.?004', case=False)
 
-                  malos = error_ani_falso | asunto_vacio | rem_vacio | fecha_vacia
+                  malos = ani_sin_num | ci004_en_rec
                   df_sanas = df[~malos].copy()
                   df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'📋 Purga de Radicados Erróneos ANI en {carpeta}:')
+                  print(f'📋 Detección de Errores en {carpeta}:')
                   print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas con \"ANI-\" erróneo a re-descargar y leer con número largo: {error_ani_falso.sum()}')
+                  print(f'   - Cartas ANI con SIN NÚMERO a re-descargar: {ani_sin_num.sum()}')
+                  print(f'   - Cartas con CI004 en Recibidas a re-descargar: {ci004_en_rec.sum()}')
 
                   for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
@@ -154,6 +155,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Correccion de radicados largos de la ANI [skip ci]" || echo "Sin cambios"
+            git commit -m "Correccion estricta de radicados ANI y purga de CI004 [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
