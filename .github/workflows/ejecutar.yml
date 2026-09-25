@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección y Descarga de Correos y Terceros
+      - name: Detección y Descarga de Cartas con Asunto CI004
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -102,25 +102,16 @@ jobs:
                   
                   es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
                   asunto_str = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str)
-                  nom_str = df['UBICACION_ARCHIVO'].fillna('').astype(str)
-                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
 
-                  # 1. Asuntos con 'acta-retrib' a reparar
-                  error_asunto_email = es_rad & asunto_str.str.contains('acta-retrib', case=False)
+                  # EXPULSAR TODAS LAS CARTAS CON ASUNTOS DAÑADOS CON CI004 PARA DESCARGAR EL PDF Y RE-TABULAR DE LA PÁGINA 2
+                  asunto_danado = es_rad & asunto_str.str.contains('CI004_|CL004_|070210|070404', case=False)
 
-                  # 2. Cartas a personas particulares con destinatario equivocado
-                  error_terceros = es_rad & nom_str.str.contains('ASALGUERO', case=False) & dest_str.str.contains('MAGDALENA', case=False)
-
-                  # 3. Cartas específicas señaladas en capturas
-                  foco = nom_str.str.contains('750120|830120|869020|869120|857820|873220|871020|873020', regex=True)
-
-                  malos = error_asunto_email | error_terceros | foco
-                  df_sanas = df[~malos].copy()
+                  df_sanas = df[~asunto_danado].copy()
                   df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'📋 Detección de Foco en {carpeta}:')
+                  print(f'📋 Detección de Asuntos Dañados en {carpeta}:')
                   print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas de correos y terceros a re-descargar y titular fielmente: {malos.sum()}')
+                  print(f'   - Cartas con Asunto CI004 a re-descargar y reparar con la pág 2: {asunto_danado.sum()}')
 
                   for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
@@ -157,6 +148,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Asuntos literales en correos y nombres fieles [skip ci]" || echo "Sin cambios"
+            git commit -m "Reparacion definitiva de asuntos de actas de retribucion [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
