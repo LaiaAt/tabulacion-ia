@@ -71,6 +71,9 @@ jobs:
             rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
           fi
 
+          touch descargar_enviadas.txt
+          touch descargar_recibidas.txt
+
           python -c "
           import os, random, re, pandas as pd
 
@@ -85,6 +88,7 @@ jobs:
               todos_rec = [line.strip() for line in f if line.strip()]
 
           if es_prueba:
+              print(f'🧪 MODO PRUEBA V2: {limite} de cada flujo.')
               descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
               descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
           else:
@@ -92,30 +96,39 @@ jobs:
               buenos = set()
 
               if reiniciar and os.path.exists(archivo_mem):
-                  os.remove(archivo_mem)
+                  try: os.remove(archivo_mem)
+                  except: pass
                   print('🗑️ Memoria borrada.')
 
               if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
-                  df = pd.read_csv(archivo_mem)
-                  
-                  es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
-                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
-                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
+                  try:
+                      # sep=None y engine='python' detecta si está separado por comas o punto y coma
+                      df = pd.read_csv(archivo_mem, sep=None, engine='python')
+                      df.columns = df.columns.str.strip() # Limpia espacios ocultos
+                      
+                      if 'UBICACION_ARCHIVO' in df.columns:
+                          es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
+                          dest_str = df.get('RAZON SOCIAL DESTINATARIO', pd.Series(dtype=str)).fillna('').astype(str)
+                          rad_dest_str = df.get('No. RADICADO DESTINATARIO', pd.Series(dtype=str)).fillna('').astype(str)
 
-                  # CACERÍA EXACTA: Radicadas hacia la Concesión que quedaron "SIN NÚMERO" o vacías
-                  es_concesion = dest_str.str.contains('MAGDALENA', case=False)
-                  con_sin_almar = es_rad & es_concesion & rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO|^$', case=False, regex=True)
+                          # CACERÍA EXACTA: Radicadas hacia la Concesión que quedaron SIN NÚMERO
+                          es_concesion = dest_str.str.contains('MAGDALENA', case=False)
+                          con_sin_almar = es_rad & es_concesion & (~rad_dest_str.str.contains('ALMA-R', case=False) | rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO|^$', case=False, regex=True))
 
-                  malos = con_sin_almar
-                  df_sanas = df[~malos].copy()
-                  df_sanas.to_csv(archivo_mem, index=False)
+                          malos = con_sin_almar
+                          df_sanas = df[~malos].copy()
+                          df_sanas.to_csv(archivo_mem, index=False)
 
-                  print(f'📋 Cacería de Errores V2 en {carpeta}:')
-                  print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas de Concesión \"SIN NÚMERO\" a re-descargar para que la IA las lea: {malos.sum()}')
+                          print(f'📋 Cacería de Errores V2 en {carpeta}:')
+                          print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
+                          print(f'   - Cartas a re-descargar para que la IA las lea: {malos.sum()}')
 
-                  for r in df_sanas['UBICACION_ARCHIVO'].dropna():
-                      buenos.add(os.path.basename(str(r).strip()).lower())
+                          for r in df_sanas['UBICACION_ARCHIVO'].dropna():
+                              buenos.add(os.path.basename(str(r).strip()).lower())
+                      else:
+                          print('⚠️ La memoria CSV está dañada o no tiene formato correcto. Se procesará todo el año.')
+                  except Exception as e:
+                      print(f'⚠️ Advertencia al leer memoria (Posible Excel corrupto): {e}')
 
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
