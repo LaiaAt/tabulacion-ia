@@ -59,7 +59,7 @@ jobs:
           token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
           EOF
 
-      - name: Detección de Errores y Descarga Selectiva
+      - name: Preparación y Descarga Selectiva
         run: |
           CARPETA="${{ inputs.carpeta_objetivo }}"
           echo "Consultando archivos en Drive para: $CARPETA"
@@ -100,32 +100,21 @@ jobs:
               if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
                   df = pd.read_csv(archivo_mem)
                   
-                  # DETECTAR FILAS CON ERRORES A RE-DESCARGAR:
-                  # 1. Radicadas hacia Concesión donde el radicado no tiene -R- (como la fila 309)
-                  es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
-                  dest_con = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str).str.contains('ALTO MAGDALENA', case=False)
-                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
-                  error_almar = es_rad & dest_con & (rad_dest_str.str.contains('ALMA', case=False) & ~rad_dest_str.str.contains('ALMA-R', case=False))
-
-                  # 2. Celdas vacías en Asunto, Remitente o Fecha
+                  # Celdas vacías críticas a re-descargar
                   asunto_vacio = df['ASUNTO / TIPO DOCUMENTAL'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
                   rem_vacio = df['RAZON SOCIAL REMITENTE'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
                   fecha_vacia = df['FECHA (DD/MM/AAAA)'].fillna('').astype(str).str.strip().isin(['', 'nan', 'None', 'NO IDENTIFICADO'])
 
-                  malos = error_almar | asunto_vacio | rem_vacio | fecha_vacia
+                  malos = asunto_vacio | rem_vacio | fecha_vacia
                   df_sanas = df[~malos].copy()
                   df_sanas.to_csv(archivo_mem, index=False)
-
-                  print(f'📋 Purga selectiva en {carpeta}:')
-                  print(f'   - Cartas sanas conservadas: {len(df_sanas)}')
-                  print(f'   - Cartas con radicado erróneo o vacíos a re-descargar: {malos.sum()}')
 
                   for r in df_sanas['UBICACION_ARCHIVO'].dropna():
                       buenos.add(os.path.basename(str(r).strip()).lower())
 
               descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
               descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
-              print(f'🎯 A descargar para corregir: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
+              print(f'🎯 A descargar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
 
           with open('descargar_enviadas.txt', 'w') as f:
               f.write('\n'.join(descargar_env))
@@ -155,6 +144,6 @@ jobs:
             git config --global user.email "bot@github.com"
             git pull --rebase origin main || true
             git add RESTREPO_2_IA_memoria_*.csv || true
-            git commit -m "Correccion estricta de ALMA-R en constancias [skip ci]" || echo "Sin cambios"
+            git commit -m "Auto-sanado completo de memoria [skip ci]" || echo "Sin cambios"
             git push origin main || true
           fi
