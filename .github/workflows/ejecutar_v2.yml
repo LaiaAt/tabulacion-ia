@@ -1,0 +1,159 @@
+name: Ejecutar Tabulacion V2 (Optica y Rescate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      es_prueba:
+        description: '¿Ejecución de prueba? (si/no)'
+        type: choice
+        options:
+          - 'no'
+          - 'si'
+        default: 'no'
+      limite_prueba:
+        description: 'Si es prueba, ¿cuántos archivos POR CADA FLUJO?'
+        required: false
+        default: '1'
+      carpeta_objetivo:
+        description: 'Escribe el nombre de la carpeta a tabular (ej. "2020" o "2017")'
+        required: true
+        default: '2020'
+      reiniciar_memoria:
+        description: '¿FORZAR reinicio desde cero borrando memoria vieja? (si/no)'
+        type: choice
+        options:
+          - 'no'
+          - 'si'
+        default: 'no'
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python, Rclone y Tesseract OCR Óptico
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone tesseract-ocr tesseract-ocr-spa
+          pip install --upgrade pip
+          pip install pymupdf pandas openpyxl requests Pillow pytesseract
+
+      - name: Configurar acceso a Google Drive
+        run: |
+          mkdir -p ~/.config/rclone
+          cat << EOF > ~/.config/rclone/rclone.conf
+          [midrive]
+          type = drive
+          client_id = ${{ secrets.DRIVE_CLIENT_ID }}
+          client_secret = ${{ secrets.DRIVE_CLIENT_SECRET }}
+          scope = drive.readonly
+          token = {"access_token":"dummy","token_type":"Bearer","refresh_token":"${{ secrets.DRIVE_REFRESH_TOKEN }}","expiry":"2023-01-01T00:00:00Z"}
+          EOF
+
+      - name: Detección y Descarga de Archivos
+        run: |
+          CARPETA="${{ inputs.carpeta_objetivo }}"
+          echo "Consultando archivos en Drive para: $CARPETA"
+
+          if [ "$CARPETA" = "todo" ]; then
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+          else
+            rclone lsf "midrive:15_01_Cartas_Enviadas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_enviadas.txt
+            rclone lsf "midrive:15_04_Comunic_Recibidas" --drive-shared-with-me --include "*${CARPETA}*/**.[pP][dD][fF]" --include "**/*${CARPETA}*/**.[pP][dD][fF]" --files-only -R > drive_recibidas.txt
+          fi
+
+          python -c "
+          import os, random, re, pandas as pd
+
+          es_prueba = '${{ inputs.es_prueba }}'.strip().lower() in ['si', 's', 'true']
+          limite = int('${{ inputs.limite_prueba }}' or '1')
+          carpeta = '${{ inputs.carpeta_objetivo }}'
+          reiniciar = '${{ inputs.reiniciar_memoria }}'.strip().lower() in ['si', 's', 'true']
+
+          with open('drive_enviadas.txt') as f:
+              todos_env = [line.strip() for line in f if line.strip()]
+          with open('drive_recibidas.txt') as f:
+              todos_rec = [line.strip() for line in f if line.strip()]
+
+          if es_prueba:
+              print(f'🧪 MODO PRUEBA V2: {limite} de cada flujo.')
+              descargar_env = random.sample(todos_env, min(len(todos_env), limite)) if todos_env else []
+              descargar_rec = random.sample(todos_rec, min(len(todos_rec), limite)) if todos_rec else []
+          else:
+              archivo_mem = f'RESTREPO_2_IA_memoria_{carpeta}.csv'
+              buenos = set()
+
+              if reiniciar and os.path.exists(archivo_mem):
+                  os.remove(archivo_mem)
+                  print('🗑️ Memoria borrada.')
+
+              if os.path.exists(archivo_mem) and os.path.getsize(archivo_mem) > 0:
+                  df = pd.read_csv(archivo_mem)
+                  
+                  es_rad = ~df['UBICACION_ARCHIVO'].astype(str).str.contains('Recibidas', case=False, na=False)
+                  dest_str = df['RAZON SOCIAL DESTINATARIO'].fillna('').astype(str)
+                  rad_dest_str = df['No. RADICADO DESTINATARIO'].fillna('').astype(str)
+
+                  # Detectar cartas de Concesión Alto Magdalena con SIN NÚMERO o sin ALMA-R
+                  es_concesion = dest_str.str.contains('MAGDALENA', case=False)
+                  con_sin_almar = es_rad & es_concesion & (~rad_dest_str.str.contains('ALMA-R', case=False) | rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO', case=False))
+
+                  # Cartas de la ANI con SIN NÚMERO en Radicadas
+                  es_ani = dest_str.str.contains('ANI|INFRAESTRUCTURA', case=False)
+                  ani_sin_num = es_rad & es_ani & rad_dest_str.str.contains('SIN NÚMERO|SIN NUMERO', case=False)
+
+                  malos = con_sin_almar | ani_sin_num
+                  df_sanas = df[~malos].copy()
+                  df_sanas.to_csv(archivo_mem, index=False)
+
+                  print(f'📋 Detección V2 en {carpeta}:')
+                  print(f'   - Cartas conservadas: {len(df_sanas)}')
+                  print(f'   - Cartas a descargar para extraer ALMA-R y radicados limpios: {malos.sum()}')
+
+                  for r in df_sanas['UBICACION_ARCHIVO'].dropna():
+                      buenos.add(os.path.basename(str(r).strip()).lower())
+
+              descargar_env = [x for x in todos_env if os.path.basename(x).lower() not in buenos]
+              descargar_rec = [x for x in todos_rec if os.path.basename(x).lower() not in buenos]
+              print(f'🎯 A descargar: Enviadas={len(descargar_env)} | Recibidas={len(descargar_rec)}')
+
+          with open('descargar_enviadas.txt', 'w') as f:
+              f.write('\n'.join(descargar_env))
+          with open('descargar_recibidas.txt', 'w') as f:
+              f.write('\n'.join(descargar_rec))
+          "
+
+          rclone copy "midrive:15_01_Cartas_Enviadas" ./15_01_Cartas_Enviadas --drive-shared-with-me --files-from descargar_enviadas.txt -v
+          rclone copy "midrive:15_04_Comunic_Recibidas" ./15_04_Comunic_Recibidas --drive-shared-with-me --files-from descargar_recibidas.txt -v
+
+      - name: Ejecutar script_v2.py
+        env:
+          ES_PRUEBA: ${{ inputs.es_prueba }}
+          LIMITE_PRUEBA: ${{ inputs.limite_prueba }}
+          CARPETA_OBJETIVO: ${{ inputs.carpeta_objetivo }}
+          REINICIAR_MEMORIA: ${{ inputs.reiniciar_memoria }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python script_v2.py
+
+      - name: Guardar Memoria en GitHub
+        if: always()
+        run: |
+          if [ "${{ inputs.es_prueba }}" != "si" ]; then
+            git config --global user.name "Bot-Memoria-V2"
+            git config --global user.email "bot@github.com"
+            git pull --rebase origin main || true
+            git add RESTREPO_2_IA_memoria_*.csv || true
+            git commit -m "Actualizacion V2 memoria [skip ci]" || echo "Sin cambios"
+            git push origin main || true
+          fi
